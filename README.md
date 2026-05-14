@@ -8,7 +8,6 @@
 - Yocto 工程学习笔记与改造指南（RK3568）
 - 嵌入式 Linux 学习指南（Bash、U-Boot、内核源码阅读）
 - Linux 设备-总线-驱动模型笔记
-- 局域网 SVN 管理
 - AI Coding 测试报告
 
 ## 目录
@@ -20,5 +19,4 @@
 | `02-嵌入式Linux学习指南(基于rk3568).md` | Bash、U-Boot、内核源码阅读 |
 | `03-yocto学习笔记(早期).md` | Yocto 早期学习记录 |
 | `04-AI Coding测试报告.md` | AI 辅助编码测试 |
-| `05-局域网SVN管理.md` | SVN 服务搭建与管理 |
-| `06-linux设备-总线-驱动.md` | Linux 设备驱动模型笔记 |
+| `05-linux设备-总线-驱动.md` | Linux 设备驱动模型笔记 |
