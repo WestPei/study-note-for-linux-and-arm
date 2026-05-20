@@ -1376,7 +1376,9 @@ KBUILD_DECONFIG:${MACHINE} ?= "*-defconfig"
 
 让内核在编译时使用我们的`defconfig`文件。这样我们就可以把这些补丁和配置碎片全部移除，之后只需要在源码上进行修改就可以了。
 
+**注意**，之前我有疑惑为什么`make savedefconfig`保存的`defconfig`比起我们最初生成`.config`时使用的比如`rk3568_*_defconfig`要少很多配置。我分别用这两个`defconfig`来生成了`.config`并比较，**发现他俩是一样的**。
 
+究其原因是因为内核配置中有很多默认项配置，这些配置与`rk3568_*_defconfig`中的配置项重合了，所以被省略了。我们最后只需要使用精简后的`defconfig`就好。
 
 
 
@@ -1568,7 +1570,7 @@ KBUILD_DEFCONFIG:${MACHINE} ?= "*.defconfig"
 
 不过目前这个还有一些问题，我直接用自己的`defconfig`替换原来，并且在配方中删除掉`cfg`片段，在内核编译的时候会出现一些小问题，比如依赖组件没有编译等等。之后正式修改的时候再来解决一下.
 
-
+我们在`bitbake`完成`do_config`之后，将`.config`保存成`defconfig`应该会将所有依赖项完成配置。
 
 # 根文件系统rootfs的构建
 
