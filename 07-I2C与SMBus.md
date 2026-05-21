@@ -124,3 +124,262 @@ D老师为我总结了一个表格，将二者进行了一个对比：
 可以发现SMBus在协议层面定义更加完整，开发者使用SMBus来编写驱动会方便一些(直接使用内核定义的API)，几乎无需在协议层做过多的操作，只需定义数据帧内部的含义即可。
 而标准I2C作为一个完整的总线协议，其可扩展性自然也是强大不少，具有更多的高级功能。开发者可以基于这些高级功能完成复杂系统。
 不过对于温度传感器这类简单的设备，SMBus的基本独写功能就足以支持驱动了。
+
+## SMBus接口解析
+
+在阅读驱动源码时，一般指看到了源码中的api调用层，没有继续往下探究了，我在看`lm92.c`时，里面的各种`i2c_smbus_*`接口并没有进去看，现在来补一补，了解一下I2C总线的电气特性是如何在软件层面实现的。
+
+### 关于`swapped`
+
+在这里有两个稍微特殊一点的接口：`i2c_smbus_read_word_swapped()`和`i2c_smbus_write_word_swapped()`。
+
+```c
+// include/linux/i2c.h
+
+static inline s32
+i2c_smbus_read_word_swapped(const struct i2c_client *client, u8 command)
+{
+	s32 value = i2c_smbus_read_word_data(client, command);
+
+	return (value < 0) ? value : swab16(value);
+}
+
+static inline s32
+i2c_smbus_write_word_swapped(const struct i2c_client *client,
+			     u8 command, u16 value)
+{
+	return i2c_smbus_write_word_data(client, command, swab16(value));
+}
+```
+
+可以看到其实本质上里面是在直接调用对应的另一个标准接口函数。只是使用`swab16()`做了一个转换。这是在干啥？
+
+`swab16()`是内核提供的一个用于做`word`字的字节序转换的宏。说到字节序自然就是那个所谓的"大端序"和"小端序"。
+
+> 这里的字节序都是针对多字节数据的。
+> 大端序指数据存储时，高位的数据放在低位地址处。
+> 小端序则是，地位的数据放在低位地址处。
+> 咱们一般使用的都是小端序(小端序便于计算机读取数据)。
+
+目前我们使用的`arm`和`x86`架构的cpu都是使用小端序。而I2C_SMBUS协议也是默认数据传输采用小端序(先传入低字节数据，再传高字节数据，这样构造出来的数据顺序也没有问题)。但是有大量传感器和设备的数据采用大端序传输。如果我们不进行调整，得到的`word`的两个字节就是反的。所以这里的两个`*_swapped`函数就是用于兼容这样的设备的。显然我们的`max6635`就是这样的设备。
+
+### `i2c_smbus_read_byte()`
+
+现在来正式看看这些协议实现，首先从I2C_SMBUS读一个字节开始，就是`i2c_smbus_read_byte()`：
+
+```c
+// drivers/i2c/i2c-core-smbus.c
+
+s32 i2c_smbus_read_byte(const struct i2c_client *client)
+{
+	union i2c_smbus_data data;
+	int status;
+
+	status = i2c_smbus_xfer(client->adapter, client->addr, client->flags,
+				I2C_SMBUS_READ, 0,
+				I2C_SMBUS_BYTE, &data);
+	return (status < 0) ? status : data.byte;
+}
+EXPORT_SYMBOL(i2c_smbus_read_byte);
+```
+
+没啥东西，就是把`i2c_client`中的成员传入`i2c_smbus_xfer()`。成功则返回`data.byte`，失败则返回错误码。不过这里面有一个结构体应该非常关键：`client->adapter`：
+
+```c
+struct i2c_adapter {
+	struct module *owner;
+	unsigned int class;		  /* classes to allow probing for */
+	const struct i2c_algorithm *algo; /* the algorithm to access the bus */
+	void *algo_data;
+
+	/* data fields that are valid for all devices	*/
+	const struct i2c_lock_operations *lock_ops;
+	struct rt_mutex bus_lock;
+	struct rt_mutex mux_lock;
+
+	int timeout;			/* in jiffies */
+	int retries;
+	struct device dev;		/* the adapter device */
+	unsigned long locked_flags;	/* owned by the I2C core */
+
+	...
+};
+```
+
+这个结构体的官方注释写的有点绕，但是可以这么理解。咱们目前使用的设备中的I2C总线都是具备一个控制器的，然后具体的传感器设备是作为从设备挂在控制器下的，I2C要干活全靠这个控制器`adapter`。里面比较重要的是`const struct i2c_algorithm *algo;`，这个结构体中放着I2C控制器的访问函数，用来驱动正经的硬件。
+
+不过这里先了解一下，我们先接着看代码。继续看`i2c_smbus_xfer()`函数内部：
+
+```c
+// drivers/i2c/i2c-core-smbus.c
+
+s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
+		   unsigned short flags, char read_write,
+		   u8 command, int protocol, union i2c_smbus_data *data)
+{
+	s32 res;
+
+	res = __i2c_lock_bus_helper(adapter);
+	if (res)
+		return res;
+
+	res = __i2c_smbus_xfer(adapter, addr, flags, read_write,
+			       command, protocol, data);
+	i2c_unlock_bus(adapter, I2C_LOCK_SEGMENT);
+
+	return res;
+}
+EXPORT_SYMBOL(i2c_smbus_xfer);
+```
+
+这里的代码逻辑倒是好理解：
+1. `__i2c_lock_bus_helper()`：获取I2C总线的锁
+2. `__i2c_smbus_xfer()`：业务函数
+3. `i2c_unlock_bus()`：释放I2C总线的锁
+
+#### I2C总线 锁
+
+这里咱们进`__i2c_lock_bus_helper()`里看看：
+
+```c
+// drivers/i2c/i2c-core.h
+
+static inline int __i2c_lock_bus_helper(struct i2c_adapter *adap)
+{
+	int ret = 0;
+
+	if (i2c_in_atomic_xfer_mode()) {
+		WARN(!adap->algo->master_xfer_atomic && !adap->algo->smbus_xfer_atomic,
+		     "No atomic I2C transfer handler for '%s'\n", dev_name(&adap->dev));
+		ret = i2c_trylock_bus(adap, I2C_LOCK_SEGMENT) ? 0 : -EAGAIN;
+	} else {
+		i2c_lock_bus(adap, I2C_LOCK_SEGMENT);
+	}
+
+	return ret;
+}
+```
+
+```c
+static inline bool i2c_in_atomic_xfer_mode(void)
+{
+	return system_state > SYSTEM_RUNNING &&
+	       (IS_ENABLED(CONFIG_PREEMPT_COUNT) ? !preemptible() : irqs_disabled());
+}
+```
+
+这里我反正是看迷糊了，有点不太知道在干啥，问了问D老师。D老师告诉我，`__i2c_lock_bus_helper()`就是一个I2c总线锁的"小帮手"，它会查询当前当前系统是否处于原子态(调用`i2c_in_atomic_xfer_mode()`)：
+1. 首先通过`system_state`判断是否处于一些**非正常运行时**(大于`SYSTEM_RUNNING`的值都是不正常运行时)。
+2. 然后是一个`?:`语法。看看系统是否支持抢占(`IS_ENABLED(CONFIG_PREEMPT_COUNT)`)，支持的话就看抢占计数，不为零则处于原子态，**不可睡眠**。没有配置抢占的话就看硬件中断是否关闭了，如果关了说明此时也不能睡眠。
+
+简单来说这个函数就是判断当前系统是否可睡眠，从而选择获取锁的方式。我们再回`__i2c_lock_bus_helper()`中可以看到，如果我们的`i2c_in_atomic_xfer_mode()`返回`true`，那么意味着此时系统处于不可睡眠的状态，自然就要判断一下I2C控制器是否有原子函数，没有就告警一下。然后就用`i2c_trylock_bus()`来尝试获取I2C的锁，失败了直接返回失败，不会陷入睡眠。
+
+如果此时是正常状态，那么就是用普通的`i2c_lock_bus()`来获取锁：
+
+```c
+static inline void
+i2c_lock_bus(struct i2c_adapter *adapter, unsigned int flags)
+{
+	adapter->lock_ops->lock_bus(adapter, flags);
+}
+```
+
+这里面的`lock_bus()`是一个函数指针。D老师告诉我，Linux内核为大部分I2C适配器提供了一个标准的、基于`rt_mutex`的锁操作实现，并作为`lock_ops`的默认值：
+
+```c
+// drivers/i2c/i2c-core-base.c
+
+static const struct i2c_lock_operations i2c_adapter_lock_ops = {
+	.lock_bus =    i2c_adapter_lock_bus,
+	.trylock_bus = i2c_adapter_trylock_bus,
+	.unlock_bus =  i2c_adapter_unlock_bus,
+};
+```
+
+在`i2c_register_adapter()`中讲`i2c_adapter`中的指针初始化：
+
+```c
+static int i2c_register_adapter(struct i2c_adapter *adap)
+{
+	...
+	if (!adap->lock_ops)
+		adap->lock_ops = &i2c_adapter_lock_ops;
+	...
+}
+```
+
+这里面的具体获取锁的函数实现可以先mark，之后再来深究。
+
+#### `__i2c_smbus_xfer()`
+
+现在回过头去看`i2c_smbus_xfer()`中的真正实现功能的函数`__i2c_smbus_xfer()`。
+
+```c
+// drivers/i2c/i2c-core-smbus.c
+
+s32 __i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
+		     unsigned short flags, char read_write,
+		     u8 command, int protocol, union i2c_smbus_data *data);
+```
+
+函数源码非常长，就不在这里贴出来了，直接去看源码好了，这里针对里面的重要逻辑来看。
+
+函数内部除了核心逻辑以外，还有两个值得关注的东西：
+1. `__i2c_check_suspended()`查看适配器是否被挂起
+2. `trace_smbus_*()`，开启`CONFIG_TRACING`时使用的内核tracepoint(跟踪点)。在调试时可以用特定的工具(比如`perf`)抓取这些trace，来实时查看总线上的消息。**并不影响I2C传输逻辑**。
+
+然后就是函数的主逻辑。
+和之前获取锁时一样，我们先用`i2c_in_atomic_xfer_mode()`判断当前系统是否可进入睡眠。不可以的话尝试使用`*_atomic()`方法，如果没有该方法则`xfer_func`指针直接为`NULL`。
+
+然后咱们就按照逻辑执行数据传递(有规定重试次数)。
+
+这里还有一个分支，就是如果适配器不支持原生的SMBus操作的话(`xfer_func`指针是空的)，就采用I2C来模拟SMBus总线操作：
+
+```c
+	if(xfer_func){
+		...
+	}
+	res = i2c_smbus_xfer_emulated(adapter, addr, flags, read_write,
+				      command, protocol, data);
+```
+
+结果主逻辑中又是调用了一个函数指针`xfer_func`。我们还得找找这个操作到底在哪里定义的。直到这里其实都可以认为是I2C子系统封装/抽象好的接口，根本没有与真正的I2C控制器驱动打交道。
+
+#### 追寻真正的硬件驱动函数
+
+我们可能得找一找咱们的I2C控制器的驱动。从设备树中找吧。这里我们一步一步查，在
+* rk3568-ok3568c.dts
+* rk3568.dtsi
+* rk356x.dtsi
+中查找`i2c2`这个节点的定义，最后在`rk356x.dtsi`中找到了：
+
+```c
+	i2c2: i2c@fe5b0000 {
+		compatible = "rockchip,rk3568-i2c", "rockchip,rk3399-i2c";
+		reg = <0x0 0xfe5b0000 0x0 0x1000>;
+		interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru CLK_I2C2>, <&cru PCLK_I2C2>;
+		clock-names = "i2c", "pclk";
+		pinctrl-0 = <&i2c2m0_xfer>;
+		pinctrl-names = "default";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+```
+
+可以看到`compatible`字段中有两个匹配项，在源码中查找这两个匹配项，发现`rockchio,rk3568-i2c`没有找到，但是在`drivers/i2c/busses/i2c-rk3x.c`中找到了第二个字段，那说明这个源码就是使用的驱动了。
+
+在源码中查找`i2c_algorithm`的定义：
+
+```c
+static const struct i2c_algorithm rk3x_i2c_algorithm = {
+	.master_xfer		= rk3x_i2c_xfer,
+	.master_xfer_atomic	= rk3x_i2c_xfer_polling,
+	.functionality		= rk3x_i2c_func,
+};
+```
+
+这不就找到了我们实际使用的与硬件打交道了驱动函数了嘛！
+
+
