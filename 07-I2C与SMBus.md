@@ -381,5 +381,225 @@ static const struct i2c_algorithm rk3x_i2c_algorithm = {
 ```
 
 这不就找到了我们实际使用的与硬件打交道了驱动函数了嘛！
+不过观察这里的`i2c_algorithm`可以发现，它没有SMBus协议的访问函数。我们再回到`__i2c_smbus_xfer()`中可以看到，如果I2C适配器没有对应的SMBus协议驱动函数，那么就是用标准I2C协议来模拟：
 
+```c
+	if (xfer_func) {
+		...
+		/*
+		 * Fall back to i2c_smbus_xfer_emulated if the adapter doesn't
+		 * implement native support for the SMBus operation.
+		 */
+	}
 
+	res = i2c_smbus_xfer_emulated(adapter, addr, flags, read_write,
+				      command, protocol, data);
+```
+
+所以实际上我们得去看这个`i2c_smbus_xfer_emulated()`：
+
+#### `i2c_smbus_xfer_emulated()`
+
+```c
+/*
+ * Simulate a SMBus command using the I2C protocol.
+ * No checking of parameters is done!
+ */
+static s32 i2c_smbus_xfer_emulated(struct i2c_adapter *adapter, u16 addr,
+				   unsigned short flags,
+				   char read_write, u8 command, int size,
+				   union i2c_smbus_data *data)
+{
+	{
+	/*
+	 * So we need to generate a series of msgs. In the case of writing, we
+	 * need to use only one message; when reading, we need two. We
+	 * initialize most things with sane defaults, to keep the code below
+	 * somewhat simpler.
+	 */
+	 ...
+}
+```
+
+这个函数简单理解就是SMBus的I2C软实现。这里面就是如何用标准I2C协议来拼一个高级协议SMBus。因为SMBus的高级功能在底层需要进行分解实现，所以有这么一个玩意儿。
+
+注释告诉我们，通过一系列I2C消息的组合就可以模拟SMBus协议：
+1. 如果是SMBus写，那么只需要一个消息
+2. 如果是SMBus读，则需要两个消息
+为了简化，模拟时尽量用最简单的默认值来进行初始化了。
+
+我们在源码中可以关注的有：
+
+```c
+	unsigned char msgbuf0[I2C_SMBUS_BLOCK_MAX+3];
+	unsigned char msgbuf1[I2C_SMBUS_BLOCK_MAX+2];
+```
+这是放置消息内容的缓冲buf，如果是读去消息，那么I2C从设备传输回来的值会放进buf；如果是往从设备写，那么就将要写的值放进buf。
+
+```c
+	struct i2c_msg msg[2] = {
+		{
+			.addr = addr,
+			.flags = flags,
+			.len = 1,
+			.buf = msgbuf0,
+		}, {
+			.addr = addr,
+			.flags = flags | I2C_M_RD,
+			.len = 0,
+			.buf = msgbuf1,
+		},
+	};
+```
+这个是用来模拟SMBus的一个消息队列。在后面的就会根据`size`来确定这个消息队列到底该怎么使用。
+> 在最开始是将`protocol`传入的，也就是`I2C_SMBUS_BYTE`这些，而在注释中午我们可以发现这些不同的协议内容其实到模拟中就是消息队列的内部有所不同，特别的读/写的消息队列分别是1和2，所以这里用`size`表示
+
+可以看到代码中的很大一块都是`switch (size) {}`，也就是根据情况初始化我们的消息队列`struct i2c_msg msg[2]`。这里我们可以看看我们最关注的`I2C_SMBUS_BYTE_DATA`：
+
+```c
+	case I2C_SMBUS_BYTE_DATA:
+		if (read_write == I2C_SMBUS_READ)
+			msg[1].len = 1;
+		else {
+			msg[0].len = 2;
+			msgbuf0[1] = data->byte;
+		}
+		break;
+```
+
+`I2C_SMBUS_BYTE_DATA`就是需要进行一个字节的读写。当是读的时候，设置消息队列`msg[1]`的长度为1(初始化时`msg[1].len = 0`，相当于没有数据)，这也符合读时消息队列为2.
+当是写的时候，设置`msg[0].len = 2`，然后将`data->byte`中的数据放到缓冲中。
+这里需要注意的是，我们的缓冲`msgbuf0[0] = command`，被**初始化为了从设备的寄存器地址的**。这是标准`I2C`的协议要求，所以实际上缓冲中包含了两个字节的内容：
+
+```c
+	msgbuf0[0] = command;
+	msgbuf0[1] = data->byte;
+```
+
+完成了根据`size`的`switch-case`之后，会有一个报错误校验的环节(如果有的话)：
+
+```c
+	bool wants_pec = ((flags & I2C_CLIENT_PEC) && size != I2C_SMBUS_QUICK
+			  && size != I2C_SMBUS_I2C_BLOCK_DATA);
+
+	if (wants_pec) {
+		...
+	}
+```
+
+大概就是如果开启了这个校验，在每一次传输后都会跟一个校验码。咱们就先不管这个。直接看后面，接着就是正式的I2C传输了：
+
+```c
+	status = __i2c_transfer(adapter, msg, nmsgs);
+```
+
+#### `__i2c_transfer()`
+
+这里没有放完整的代码，只放了一些代码片段。
+
+```c
+int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+	if (!adap->algo->master_xfer) {
+		dev_dbg(&adap->dev, "I2C level transfers not supported\n");
+		return -EOPNOTSUPP;
+	}
+
+	if (WARN_ON(!msgs || num < 1))
+		return -EINVAL;
+
+	ret = __i2c_check_suspended(adap);
+	if (ret)
+		return ret;
+
+	if (adap->quirks && i2c_check_for_quirks(adap, msgs, num))
+		return -EOPNOTSUPP;
+
+	if (static_branch_unlikely(&i2c_trace_msg_key)) {}
+
+	/* Retry automatically on arbitration loss */
+	orig_jiffies = jiffies;
+	for (ret = 0, try = 0; try <= adap->retries; try++) {
+		if (i2c_in_atomic_xfer_mode() && adap->algo->master_xfer_atomic)
+			ret = adap->algo->master_xfer_atomic(adap, msgs, num);
+		else
+			ret = adap->algo->master_xfer(adap, msgs, num);
+
+		if (ret != -EAGAIN)
+			break;
+		if (time_after(jiffies, orig_jiffies + adap->timeout))
+			break;
+	}
+```
+
+在这个函数内部可以结构和`__i2c_smbus_xfer()`很像，它的核心就是那一段通过`jiffies`来重试和超时的部分。其余就是：
+* 判断I2C适配器是否有可用的I2C协议操作(就是那个定义的`adap->algo->master_xfer`)
+* 判断消息队列是否合法
+* 判断I2C控制器有没有挂死
+* 检查当前I2C设备是否支持这种传输`i2c_check_for_quirks()`(似乎是和硬件有关)
+* 还有用于调试的`tracepoint`
+
+最后就是尝试调用`adap->algo->master_xfer()`了，那么我们就又回到了实际的I2C总线驱动了，这个就是我们之前通过设备树的`compatible`字段找到的`i2c-core-smbus.c`
+
+#### 再次回到硬件驱动
+
+其实也是可预见的，当我们发现没有对应的SMBus的驱动函数，要用软件模拟的时候，最后肯定就是用`i2c_algorithm`结构体中的标准I2C协议驱动来模拟咯，只是外面套了一层实现SMBus协议的壳子。现在我们就来看看操作函数指针`master_xfer)_`对应的`rk3x_i2c_xfer`吧。
+
+```c
+static int rk3x_i2c_xfer(struct i2c_adapter *adap,
+			 struct i2c_msg *msgs, int num)
+{
+	return rk3x_i2c_xfer_common(adap, msgs, num, false);
+}
+```
+
+这是一个非原子操作版的I2C传输函数，给`rk3x_i2c_xfer_common`传递的`polling`字段为`false`(如果是源自操作就是`true`)。
+
+`rk3x_i2c_xfer_common()`代码比较长，这里就不贴了，只讲我感兴趣的。
+
+首先就是一个
+
+```c
+	struct rk3x_i2c *i2c = (struct rk3x_i2c *)adap->algo_data;
+```
+
+给我干的有点懵，仔细看看其实是将`adap->algo_data`这个指针类型转换为`struct rk3x_i2c *`，至于为啥这么干，其实就是为了基于这个I2C适配器获取我们硬件驱动的私有数据。在`i2c-rk3x.c`驱动的`probe`中可以看到：
+
+```c
+	struct rk3x_i2c *i2c;
+	i2c = devm_kzalloc(&pdev->dev, sizeof(struct rk3x_i2c), GFP_KERNEL);
+	i2c->adap.algo_data = i2c;
+```
+
+这个`i2c`就是硬件I2C驱动的私有结构体(用于表示I2C控制器的相关信息)，他与I2C适配器的结构体(表示一条I2C总线)可以相互找到。
+
+这里就是利用`adapter`找到`i2c`的过程。因为实际传输时需要操作I2C控制器，需要使用到`i2c`这个结构体。
+
+在传输消息前会用`spin_lock_irqsave()`来获取自旋锁，关闭终端并且保存现场状态，放置死锁。然后`clk_enable()`使能I2C时钟。
+
+完成这些操作后就是处理和发送我们的消息，它被包在一个`for`循环中：
+```c
+	for (i = 0; i < num ; i += ret) {
+		
+	}
+```
+
+看起来是rk的I2C驱动会对消息做一些额外的处理，这里是说一次性可以处理消息队列里的多条信息：
+
+```c
+	/*
+	 * Process msgs. We can handle more than one message at once (see
+	 * rk3x_i2c_setup()).
+	 */
+
+	ret = rk3x_i2c_setup(i2c, msgs + i, num - i);
+	if (ret < 0) {
+		dev_err(i2c->dev, "rk3x_i2c_setup() failed\n");
+		break;
+	}
+```
+这个`setup`的作用就是将要进行的操作翻译给I2C控制器硬件。然后在整个驱动中就是通过软件进行中断、时钟、锁的使能等配置，然后将数据给到I2C控制器，控制器来负责将这些数据转换成符合I2C电气特性的信号发送和接收。
+
+如果感兴趣的话也可以继续往`rk3x_i2c_setup()`中看，以及看`rk3x_i2c_xfer_common()`本身。
+
+不过到这里我觉得已经差不多了。
