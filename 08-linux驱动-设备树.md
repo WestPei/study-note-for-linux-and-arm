@@ -74,6 +74,8 @@
     };
 ```
 
+---
+
 ### 2.1 `#clock-cells`
 
 - **作用**：声明引用该节点时需要提供的参数个数。例如，`#clock-cells = <1>` 表示消费者在`clocks`属性中引用该节点时，必须带一个u32索引参数，用来指定具体使用该控制器的哪一路时钟输出。**该属性只有生产者才会有，且必须有**。
@@ -88,6 +90,8 @@
     
     消费者引用：`clocks = <&osc>;`
   - `#clock-cells = <1>`：提供多个时钟输出，引用时需要索引参数。RK3568的CRU就是典型例子，消费者引用：`clocks = <&cru SCLK_GMAC1_RX_TX>;`，其中`SCLK_GMAC1_RX_TX`是驱动定义的一个宏（数值ID）。
+
+---
 
 ### 2.2 `assigned-clocks`、`assigned-clock-parents`、`assigned-clock-rates`
 
