@@ -24,7 +24,7 @@
 | `02-嵌入式Linux学习指南(基于rk3568).md` | Bash 脚本、U-Boot 启动流程、内核源码阅读、以太网调试 |
 | `03-yocto学习笔记(早期).md` | BitBake 引擎、配方/层/镜像等 Yocto 基础知识 |
 | `04-AI Coding测试报告.md` | 本地 AI 模型在嵌入式开发中的编码、审查与测试评估 |
-| `05-linux设备-总线-驱动.md` | kobject/kset、bus/device/driver 关系、platform/I2C/SPI 总线 |
+| `05-linux设备驱动模型.md` | 设备-总线-驱动模型、I2C 实例解析、数据访问模型、sysfs 拓扑结构 |
 | `06-驱动实例(MAX6635).md` | MAX6635 驱动 probe 分析、hwmon 子系统、devres 生命周期 |
 | `07-I2C与SMBus.md` | I2C/SMBus 协议对比、Linux I2C 子系统架构、rk3x 控制器驱动 |
 | `08-linux驱动-设备树.md` | RK3568 CRU 时钟控制器、clock-cells、assigned-clocks 机制 |
