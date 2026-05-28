@@ -17,7 +17,7 @@ yocto工程的初始化不可避免地会使用Bash脚本，因此有必要掌�
 | **`[ condition ]`**   | **条件测试**        | `test`命令的另一种形式，用于条件判断。注意括号内的条件表达式需要遵循特定规则，例如字符串比较用 `=`，整数比较用 `-eq`。 |
 | **`[[ condition ]]`** | **增强的条件测试**  | 比 `[]`更强大、更安全，支持模式匹配（`==`）和正则匹配（`=~`）。例如 `if [[ "$name" == u* ]]`。 |
 
-
+---
 
 # Linux/U-boot源码阅读指南
 
@@ -39,6 +39,8 @@ yocto工程的初始化不可避免地会使用Bash脚本，因此有必要掌�
 
 
 不过这种方式似乎存在一定问题，可能会因为内核版本的不同，`.o.cmd`的格式存在差异而导致脚本提取文件失败，比较可行的方法是将想要阅读的源码的`.o.cmd`格式发给AI，让他帮你写一个脚本来提取。
+
+---
 
 ### 基于compile_commands.json+VScode clangd插件
 
@@ -78,7 +80,7 @@ CompileFlags:
 
 完成配置或者修改配置后，记得`shift+ctrl+P: clangd restart language server`来重启`clangd`服务器使得配置生效。然后我们就可以正常跳转了，不过需要注意的是，如果跳转不了，很有可能是当前文件并没有参与编译。
 
-
+---
 
 ## U-boot源码阅读
 
@@ -101,6 +103,8 @@ win端的rkdevtool工具存在版本问题，经过验证v2.84版本没有问题
 另外注意波特率，出现乱码一般是波特率的问题，uboot和内核的波特率需要分别进行修改...(前辈通过打patch包的方式来得到)，注意第一次编译时需要将所有的补丁和配置文件打入，不然可能会出现各种问题。
 
 另外就是如果需要自己手动修改，那可能需要分别修改uboot和内核的defconfig文件。具体修改方式自行查找。
+
+---
 
 ## 添加uboot-env分区
 
@@ -133,7 +137,7 @@ CONFIG_ENV_SIZE=0x200000
 
 **注意**：这里的做法其实是早期的一个非常不成熟的做法，比较标准的做法还是使用`menuconfig`进入可视化菜单，通过选中相关选项来实现更改配置(因为可能U-boot的版本不同，具体的配置宏名字有差异，手写可能会出现配置不生效的情况)。
 
-
+---
 
 ## Boot分区烧写指南
 
@@ -214,7 +218,7 @@ dd if=*.wic of=target.wic2 bs=512 skip=32768 count=524288
 
 就会发现该标志位没有了，具体原因很有可能是`wic`镜像在开头储存了分区表来对各个分区进行描述和标记，显然拆出来的镜像没有这个头。并且wks的分区定义转换到`parameter`文件中似乎会丢失一些参数，因此我们需要手动去更改一下`boot`分区，将其设置为`bootable`。
 
-
+---
 
 ### 裸镜像启动(带`android`头)
 
@@ -232,7 +236,7 @@ boot_android mmc 0:3 # 注意boot分区
 
 **为了避免额外的问题，最好也像烧录带文件系统的`boot`分区镜像一样，在分区表中手动标记为`bootable`。**
 
-
+---
 
 # 调通内核网口
 
@@ -255,7 +259,7 @@ boot_android mmc 0:3 # 注意boot分区
 
 正常来说，这时我们直接就能够在终端相互ping通，但是失败了。
 
-
+---
 
 ### 排查问题
 
@@ -380,6 +384,8 @@ sudo ethtool -A eno1 rx off tx off
 
 降速到百兆后虽然能够ping通，但是丢包率非常高，超过50%。用tcpdump抓包查看数据发现还是开发板发送reply数据到pc端，pc端不一定能够收到。我对比了接收到的reply数据包，能够被tcpdump抓到的都是没问题的，开发板发送的和pc端收到的是一个包，没有错误。
 
+---
+
 ### 采用发包工具验证
 
 尝试用发包工具，在win下使用发包工具`anysend`发送至开发板(使用的是ARP协议)，开发板端可以使用
@@ -403,7 +409,7 @@ tcpreplay -i end0 --pps=1 /temp/rx_arp.pcap # 向end0网口发送arp数据包
 
 因为在百兆下，对延时的要求降低了，所以能够ping通，但是也仍然丢包严重。
 
-
+---
 
 # U-boot
 
@@ -440,7 +446,7 @@ dumpimage -l uboot.img
 
 这样可以看到该镜像的一些更加详细的输出。
 
-
+---
 
 ## U-boot命令行
 
@@ -461,7 +467,7 @@ dumpimage -l uboot.img
 | **网络操作**     | `ping 192.168.1.1`, `tftpboot 0x82000000 uImage`     | 测试网络连通性；通过TFTP协议从服务器下载文件（如内核镜像）到内存。 |
 | **系统启动**     | `bootm 0x82000000`, `bootz 0x82000000 - 0x83000000`  | 启动位于内存指定地址的内核镜像。`bootz`常用于启动zImage格式内核，`-`表示无initrd，后跟设备树地址。 |
 
-
+---
 
 ## 在U-boot源码中修改启动配置宏
 
@@ -483,7 +489,7 @@ U-boot的环境变量是通过编译时**拼接字符串宏来生成的**。如�
 
 有关`Kconfig`，`defconfig`和`menuconfig`之间的关系，需要单独了解，这里不作赘述。
 
-
+---
 
 ## 移植U-boot的源码，添加命令行工具
 
@@ -497,7 +503,7 @@ remote->ddr->emmc
 
 
 
-在U-boot源码中，命令行所使用的各种工具都在`cmd`目录下有定义，按照其类型分为各个源码文件甚至目录。由于我们的任务最终是将系统镜像下载到存储介质中(多是EMMC)，因此我们可以直接在`mmc.c`中添加命令的源码。
+在U-boot源码中，命令行所使用的各种工具都在`cmd`目录下有定义，按照其类型分为各个源码文件甚至目录。由于我们的任务最终是将系统镜像下载到存储介质中(多是eMMC)，因此我们可以直接在`mmc.c`中添加命令的源码。
 
 **注意！**添加完我们的源码函数后，需要使用`U_BOOT_CMD`宏来注册我们的命令，这是标准做法，这样U-boot在编译时会识别到这是一个命令并把它放到一个特殊的段中，并注册到命令表中。但是这还没完！
 
@@ -535,7 +541,7 @@ config CMD_UP
 
 包裹起来，这样是一个比较标准的符合U-boot开发的方式，通过配置选项来管理我们的源码是否被编译。但是其实也可以不用修改`Kconfig`，只需要添加一个简单的`Makefile`命令，这样我们的源码就会正常参与编译，只是这样非常不优雅。
 
-
+---
 
 ## U-boot 启动流程
 
@@ -631,7 +637,7 @@ static int run_main_loop(void)
 
 这一次就是真的进入标准C程序了。
 
-
+---
 
 ## U-boot设备模型
 
@@ -668,4 +674,277 @@ initr_net()
 ```
 
 这是代码层面可以找到的，但是具体的mac控制器和phy芯片的驱动和设备是如何绑定和probe的，我其实还是会有一点点懵。
+
+---
+
+# 关于分区
+
+## parameter分区表
+
+在调试和实际工程中，除开常用的`uboot`，`boot`还有`rootfs`这几个分区外，我们可能还需要对SoC的存储设备，如eMMC进行额外的分区并挂载到对应目录下，用于隔离存放一些关键文件，比如日志。
+
+用于启动小系统的几个分区一般都是裸写的，在镜像内部可能会带文件系统。我们想要在原有的分区之后添加新的分区，其实通过软件就可以实现。
+
+对于其他厂商的SoC，前辈们使用的是uuu工具(类似于一个通用的烧录工具吧)。
+
+但是对于Rockchip，由于厂商对启动有定制，所以最好是使用官方提供的烧录工具(win和linux下均有)。比如我使用的就是win下的GUI烧录工具`RKDevTool`。
+
+使用该工具烧录时需要注意，如果是使用yocto制作的`wic`镜像，那么直接整体烧录就好。但是工具也支持按照分区分别烧录。
+
+这种方式需要从`deploy`目录中拷贝`parameter`，这个是根据`wks`脚本自动生成的分区表。我们可以手动修改的。
+
+parameter格式类似：
+
+```
+# IMAGE_NAME: cetca-avod-minimal-rk3568-avod.rootfs-20251216070241.wic
+FIRMWARE_VER: 1.0
+TYPE: GPT
+CMDLINE: mtdparts=rk29xxnand:0x00002000@0x00002000(uboot),0x00001000@0x00004000(uboot-env),0x00080000@0x00008000(boot:bootable),-@0x00088000(rootfs:grow)
+uuid: rootfs=614e0000-0000-4b53-8000-1d28000054a9
+```
+
+这个`parameter`文件是Rockchip特有的一种文件，用来指导系统划分和管理存储设备。它一般是由SDK或者其他构建工程自动生成。我们主要是关注其中的`CMDLINE`。它是**核心分区信息**，包含传递给内核的命令行参数以及`mtdparts`定义。我们接下来详细了解一下它。
+
+`CMDLINE`字段是分区的核心，它使用`mtdparts`格式定义：
+
+```
+size@offset(name:tag)
+```
+
+* 大小(`size`)和起始地址(`offset`)的单位都是扇区(`Sector`)，通常情况下一个扇区为512字节(`0x200`)。
+* 保留区域：一般在eMMC最前端会有一定的空间作为保留区，用来保证启动代码和数据的安全。(分区表和一些启动代码会在这个区域)
+* 自动增长分区：使用`-`作为`size`，并在分区名称后添加`:grow`的tag，表示该分区将占用所有剩余空间。
+
+另外，如果我们通过手动修改`parameter`文件，并且基于它来分区分镜像烧录的化。我们需要为内核分区镜像添加`:bootable`来标识该分区可启动。类似于GPT属性`Legacy BIOS bootable`。这样系统才可以找到`boot`分区中的内核镜像并启动。
+
+---
+
+### 修改parameter，新建日志分区(并添加文件系统)
+
+可以看到原来的分区表中每一个分区镜像都是比较紧凑的，然后将`rootfs`分区设置为自动增长，相当于将之后所有的eMMC都给了这个分区。
+
+我们如果想要在后面增加一个用于存放日志的分区，需要进行两步操作：
+
+1. 修改`parameter`分区表
+2. 进入小系统，添加文件系统并挂载
+
+首先就是修改分区表，这个很好改，首先就是将`rootfs`分区改为固定大小，比如1GB，这里注意换算(最后一个分区的结束扇区不能超过eMMC的最大值)：
+
+```
+1GB = 1024 \times 1024 \times 1024 Bit
+
+1 Sector = 512 Bit
+
+1GB = 2 * 1024 * 1024 Sector = 2^21 = 2 * (2^4)^5 = 0x20 0000
+```
+
+然后紧跟其后我们多一个分区：
+
+```
+# IMAGE_NAME: cetca-avod-minimal-rk3568-avod.rootfs-20251216070241.wic
+FIRMWARE_VER: 1.0
+TYPE: GPT
+CMDLINE: mtdparts=rk29xxnand:0x00002000@0x00002000(uboot),0x00001000@0x00004000(uboot-env),0x00080000@0x00008000(boot:bootable),0x200000@0x00088000(rootfs),0x80000@0x288000(testfs)
+uuid: rootfs=614e0000-0000-4b53-8000-1d28000054a9
+```
+
+由于我们只是新增分区，没有新的镜像，因此只需加载新的`parameter`重新烧录一下就好了。进入内核我们可以通过`lsblk -l`查看分区情况：
+
+```bash
+root@rk3568-avod:/mnt/emmc_p5# lsblk -l
+NAME         MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+mmcblk0      179:0    0 28.9G  0 disk
+mmcblk0p1    179:1    0    4M  0 part
+mmcblk0p2    179:2    0    2M  0 part
+mmcblk0p3    179:3    0  256M  0 part
+mmcblk0p4    179:4    0    1G  0 part /
+mmcblk0p5    179:5    0  256M  0 part
+mmcblk0boot0 179:32   0    4M  1 disk
+mmcblk0boot1 179:64   0    4M  1 disk
+```
+
+可以发现咱们多了一个`mmcblk0p5`，这个就是我们新增的分区，他是一个空白的裸分区。现在进行第二步，通过工具为其增加文件系统并挂载到一个固定目录。
+
+我们这里采用`ext4`作为文件系统，那么就有对应的工具包"e2fsprogs"。使用`mkfs.ext4`命令会对分区进行格式化：
+
+```bash
+# 确保使用root权限
+mkfs.ext4 /dev/mmcblk0p5
+```
+
+该操作会**永久删除**该分区中的所有数据，请确保安全的情况进行操作。执行成功后会输出关于文件系统的信息：
+
+```bash
+root@rk3568-avod:~# mkfs.ext4 /dev/mmcblk0p5
+mke2fs 1.47.0 (5-Feb-2023)
+Discarding device blocks: done
+Creating filesystem with 262144 1k blocks and 65536 inodes
+Filesystem UUID: ff2b1db1-35c7-48fa-941b-0f85e8565dee
+Superblock backups stored on blocks:
+        8193, 24577, 40961, 57345, 73729, 204801, 221185
+
+Allocating group tables: done
+Writing inode tables: done
+Creating journal (8192 blocks): done
+Writing superblocks and filesystem accounting information: done
+```
+
+然后我们创建挂载点，这里以`/mnt/emmc_p5`为例：
+
+```bash
+mkdir -p /mnt/emmc_p5`
+mount /dev/mmcblk0p5 /mnt/emmc_p5
+```
+
+完成之后可以查看情况：
+
+```bash
+root@rk3568-avod:/mnt# df -h
+Filesystem                Size      Used Available Use% Mounted on
+/dev/root               271.1M    184.5M     67.6M  73% /
+devtmpfs                  1.9G         0      1.9G   0% /dev
+tmpfs                     1.9G         0      1.9G   0% /dev/shm
+tmpfs                   781.8M      8.8M    773.0M   1% /run
+tmpfs                     1.9G         0      1.9G   0% /tmp
+tmpfs                     1.9G    172.0K      1.9G   0% /var/volatile
+tmpfs                   390.9M      4.0K    390.9M   0% /run/user/0
+/dev/mmcblk0p5          229.9M     78.0K    213.0M   0% /mnt/emmc_p5
+```
+
+可以看到eMMC的p5分区已经成功挂载了。不过目前只是暂时挂载，重启之后又需要手动挂载，很麻烦。那么有没有开机自动挂载的方法呢？有的兄弟，有的。
+
+我们可以通过修改`/etc/fstab`文件来指定分区开机就挂载。这里D老师推荐我们使用`UUID`来指定设备，`UUID`可以看作是设备的身份证，唯一标识，比起直接使用`/dev/mmcblk0p5`这个设备名字更加稳定(其实这里区别应该不大)。
+
+```bash
+# 获取分区的UUID
+
+root@rk3568-avod:/mnt# blkid /dev/mmcblk0p5
+/dev/mmcblk0p5: UUID="ff2b1db1-35c7-48fa-941b-0f85e8565dee" BLOCK_SIZE="1024" TYPE="ext4" PARTLABEL="testfs" PARTUUID="6a7c0000-0000-4804-8000-0f8700005208"
+```
+
+然后编辑`/etc/fstab`文件：
+
+```bash
+# stock fstab - you probably want to override this with a machine specific one
+
+/dev/root            /                    auto       defaults              1  1
+proc                 /proc                proc       defaults              0  0
+devpts               /dev/pts             devpts     mode=0620,ptmxmode=0666,gid=5      0  0
+tmpfs                /run                 tmpfs      mode=0755,nodev,nosuid,strictatime 0  0
+tmpfs                /var/volatile        tmpfs      defaults              0  0
+
+UUID=ff2b1db1-35c7-48fa-941b-0f85e8565dee /mnt/emmc_p5 ext4 defaults 0 0
+
+# uncomment this if your device has a SD/MMC/Transflash slot
+#/dev/mmcblk0p1       /media/card          auto       defaults,sync,noauto  0  0
+
+```
+
+这里解释一下配置格式：
+* `UUID`：标识我们的分区
+* `/mnt/emmc_p5`：挂载点目录
+* `ext4`：分区上的文件系统
+* `defaults`：使用默认的挂载选项(包括独写权限)
+* `0`：`dump`备份选项，通常为0
+* `0`：`fsck`开机检查顺序，根分区(`/`)是1，非系统飞去通常设为`0`(不检查)或者2。
+
+最后一行就是我们添加的`mmcblk0p5`分区的挂载情况，你会发现这里面与`df -h`看到的很像，这就对了。这里实测将`UUID`换成`mmcblk0p5`也是可行的。
+
+使用`mount -a`来检查我们的格式是否正确。完成后重启也可以看到我们的分区会自动挂载了。
+
+---
+
+## wks文件
+
+在yocto工程中，Rockchip推荐的官方镜像制作方法是制作一个`wic`大镜像，里面会囊括所有的组件。而`wks`文件就是指导制作`wic`镜像的说明书/蓝图。它使用的语法似乎是`kickstart`语法(和`redhat`系统有关系，我没有深究)。
+
+我们以已有的`wks.in`模板文件为基准来分析如何写一个`wks`文件。
+
+```c
+# 这是我自己修改的版本，加入了uboot_env log usr等分区，并且使用了rockchip-image.bbclass的环境
+# 指定GPT分区表，适配emmc
+bootloader --ptable gpt
+# idblock分区
+part --source rawcopy --sourceparams="file=idblock.img" --align 32 --no-table
+# U-boot分区：4MB，rawcopy烧录，4MB偏移起始
+part --source rawcopy --sourceparams="file=uboot.img" --part-name uboot --offset 4M --align 4
+# U-boot-env分区：2MB，无文件系统
+part --part-name uboot-env --fstype=none --align 4 --fixed-size 2M
+# Boot分区：256MB，ext4文件系统，挂载/boot，8MB对齐，启动分区
+part /boot --source bootimg-partition --fstype=ext4 --label boot --active --mkfs-extraopts "${RK_ROOTFS_EXTRAOPTS}" --align 8192 --fixed-size 256M --sourceparams="loader=u-boot" --use-uuid
+# Rootfs分区：512MB，根文件系统，8MB对齐
+part / --source rootfs --fstype ${RK_ROOTFS_TYPE} --part-name rootfs --uuid ${RK_ROOTDEV_UUID} --mkfs-extraopts "${RK_ROOTFS_EXTRAOPTS} -e continue" --align 8192 --fixed-size 512M
+```
+
+---
+
+### 语法解析
+
+全局指令：`bootloader --ptable gpt`
+* `bootloader`：声明要生成一个带有引导加载程序的镜像，并指定了属性。
+* `--ptable gpt`：明确使用**GUID分区表(GPT)**，而不是传统的MBR。这是现代嵌入式系统推荐的方式，尤其适合大容量eMMC，能够提供冗余分区表、分区名、UUID等。
+
+分区的定义：`part`命令的核心选项：
+
+| 选项 | 含义与作用 | 典型用法 |
+| :--- | :--- | :--- |
+| `--source` | **内容来源插件**，告诉 wic 如何生成该分区的数据。 | `rawcopy`（原样拷贝镜像），`bootimg-partition`（自动生成启动分区），`rootfs`（拷贝根文件系统） |
+| `--sourceparams` | **传递给插件的参数**。 | `file=uboot.img` 指示 `rawcopy` 插件去拷贝指定文件的内容。 |
+| `--part-name` | **GPT 分区名**，用于 U-Boot、fastboot 等按名称查找分区。 | `uboot`, `trust`, `rootfs` 等。 |
+| `--fstype` | **文件系统类型**。 | `ext4`, `vfat` 或 `none`（表示分区不创建文件系统，用于存放裸二进制数据）。 |
+| `--label` | **文件系统卷标**（与 GPT 分区名不同）。 | `boot`，系统挂载后会显示为 `/dev/disk/by-label/boot`。 |
+| `--fixed-size` | **精确分区大小**，单位 M、K 等，不能和 `--source` 一起使用（除非 source 能自动确定大小）。 | `boot` 用了 `--fixed-size 256M`。注意：`--source rootfs` 通常不指定 `--fixed-size`，但我们指定了，这会导致根文件系统分区大小固定。 |
+| `--align` | **分区起始和大小对齐边界**，单位 KiB。目的是优化存储性能（如 eMMC 的写放大）。 | 大部分 4 (4KiB) 或 8192 (8MiB)。8MiB 对齐是 eMMC 典型的最佳实践。 |
+| `--offset` | **分区起始的绝对偏移**，单位 K、M 等。用于固定分区物理位置。 | `uboot` 分区从偏移 4M 开始。 |
+| `--no-table` | 告诉 wic **不要将此分区加入分区表**。 | `idblock` 分区使用了此选项，通常这种分区是 SoC 启动 ROM 在固定位置读取的引导块，不能被子系统看到或占用。 |
+| `--active` | 在分区表中**标记活动标志**（legacy bootable），使得 U-Boot 可以识别为启动分区。 |  `boot` 分区启用了此标志。 |
+| `--use-uuid` | 在 `/etc/fstab` 中使用分区的 **UUID** 来挂载，而非设备名（如 `/dev/mmcblk0p5`），保证挂载的稳定性。 | `rootfs` 和 `boot` 都用了。 |
+| `--uuid` | **直接指定 UUID** 值，而不是让系统随机生成。 | `${RK_ROOTDEV_UUID}` 是变量，保证构建的一致性。 |
+| `--mkfs-extraopts` | **创建文件系统时传递额外参数**给 `mkfs.*` 命令。 | `${RK_ROOTFS_EXTRAOPTS}` 是一个变量，可能包含 `-E lazy_itable_init` 等优化选项，`-e continue` 是 `ext4` 的特性，允许在遇到错误时继续挂载。 |
+
+---
+
+### 关键分区解析
+
+#### 1. `idblock` 分区（不含分区表）
+```bash
+part --source rawcopy --sourceparams="file=idblock.img" --align 32 --no-table
+```
+- **作用**：Rockchip 的 IDBLOCK 是 eMMC 启动时最先被芯片内部 BootROM 读取的块，包含 DDR 初始化、时钟配置等关键信息。
+- **`--no-table`**：它不在 GPT 分区表中出现，因为 BootROM 只认固定物理地址（通常是 eMMC 的扇区 64 或 0），不能被常规操作系统干扰。
+- **`--align 32`**：32KiB 对齐，确保其在预期的物理位置。
+
+#### 2. U-Boot 分区（偏移 4M）
+```bash
+part --source rawcopy --sourceparams="file=uboot.img" --part-name uboot --offset 4M --align 4
+```
+- **`--offset 4M`**：强制此分区起始于 eMMC 的 4MiB 偏移处。这通常是 Rockchip 平台 U-Boot SPL/TPL 的存放位置（紧接 IDBLOCK 之后）。
+- **`--align 4`**：4KiB 对齐。
+
+#### 3. U-Boot 环境变量分区
+```bash
+part --part-name uboot-env --fstype=none --align 4 --fixed-size 2M
+```
+- **`--fstype=none`**：此分区存储的是 U-Boot 环境变量的二进制数据，不需要文件系统。
+- **目的**：将环境变量存储在独立的分区，方便升级 U-Boot 时保留配置，或通过读写分区来恢复出厂设置。
+
+#### 4. Boot 分区（启动分区）
+```bash
+part /boot --source bootimg-partition --fstype=ext4 --label boot --active ...
+```
+- **`--source bootimg-partition`**：特殊插件，会自动将内核、设备树、ramdisk 等文件按格式整合到此分区，通常配合 `loader=u-boot` 参数使用，指示生成 U-Boot 可识别的启动镜像格式（如 Android boot image 或 FIT）。
+- **`--active`**：标记为可引导分区，这样 U-Boot 的 distro boot 流程才能自动找到它。
+
+#### 5. Rootfs 分区
+```bash
+part / --source rootfs --fstype ${RK_ROOTFS_TYPE} --part-name rootfs --uuid ${RK_ROOTDEV_UUID} ...
+```
+- **`--source rootfs`**：直接拷贝 Yocto 构建生成的根文件系统目录内容到此分区。
+- **`-e continue`**：`mkfs.ext4` 的选项，表示当遇到错误时，文件系统继续挂载而不是触发 panic，这对嵌入式产品容错很重要。
+- **`--fixed-size 512M`**：强制根文件系统分区固定为 512MiB，与通常使用 `--size` 留出自动增长空间不同，这可能是因为你有额外的 `/usr`、`/var/log` 等独立分区，想把根分区限制住。
+
+
+文件中出现的 `${RK_ROOTFS_TYPE}`、`${RK_ROOTDEV_UUID}`、`${RK_ROOTFS_EXTRAOPTS}` 都是在 `rockchip-image.bbclass` 或配方中定义好的 BitBake 变量。这样一份 `.wks.in` 模板可以通过不同机器配置文件传递不同参数，实现复用。
+
+
 
