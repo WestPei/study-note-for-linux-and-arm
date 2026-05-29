@@ -113,6 +113,8 @@ CompileFlags:
 
 **注意**：如果跳转不了，大概率是当前文件没有参与编译（未包含在 `compile_commands.json` 中）。
 
+不过为了不污染源码目录(`.vscode`这种目录会被 svn 忽略)，我们可以把 `compile_commands.json` 放到源码外。(一方面是因为 yocto 构建时要求我们的源码目录的干净，而 `make distclean` 会把源码目录下的 `compile_commands.json` 给清理，而每次生成很花时间，不如直接保存在外面)。
+
 ---
 
 # 3. U-boot 源码阅读
