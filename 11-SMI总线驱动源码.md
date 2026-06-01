@@ -11,7 +11,10 @@
     - [1.2.3. 寄存器互斥锁初始化](#123-寄存器互斥锁初始化)
     - [1.2.4. MDIO 总线对象解析](#124-mdio-总线对象解析)
     - [1.2.5. 字符设备注册](#125-字符设备注册)
+    - [1.2.6. 神奇的 phandle](#126-神奇的-phandle)
   - [1.3. 字符设备操作](#13-字符设备操作)
+    - [1.3.1. 引用计数：open/release](#131-引用计数openrelease)
+    - [1.3.2. 核心交互：ioctl](#132-核心交互ioctl)
 
 ---
 
@@ -375,13 +378,144 @@ static int smi_bus_chip_reg_lock_init(struct device_node *node, int dev_num)
 5. 创建新字符设备：`device_create`会在`/dev`下生成`smi_bus`节点，同时触发`uevent`。
 
 
+### 1.2.6. 神奇的 phandle
 
+在 `probe` 源码中肯定会注意到一个特别的函数 `of_parse_phandle()`。它通过 `pandle` 从当前设备节点中获取其他设备节点，从而能够得到其他节点的对应资源。
 
+> phandle 可以粗暴地理解为 **设备树中的指针**。
+> 更官方的解释为：phandle 属性为 devicetree 中唯一的 节点指定一个数字标识符。节点中的 phandle 属性取值必须是唯一的。这里的 phandle 是节点中的一个具体的属性。
+> 其实还有一个 label，它是设备树节点的一个标签，一般形式是
+> `label: device@address {}`
+> 而在 dts 被编译时会将 label 展开为节点的 phandle 值。我们在 dts 中可以用 `&<label>` 来引用该节点，去修改该节点的一些配置。
+
+我们就可以使用 `of_parse_phandle(const struct device_node *np, const char *phandle_name, int index)` 来从一个 `device_node` 中获取指定 `phandle` 名称的节点。如果这个 `phandle` 变量是一个数组，那么还需要给出 `index` 值，非数组默认为 `0`。
+
+这里其实可以理解为一个虚拟设备 `switch-dev` (作为我们驱动的对应设备，没啥实际作用)中拥有三个属性，分别指向了三个 `phandle`:
+
+```c
+    cpu_port = <&fec2>;
+    mdio_bus1 = <&mdio1>;
+    mdio_bus2 = <&mdio2>;
+```
+
+所以可以通过 `phandle-name = cpu_port` 来找到 `fec2`。然后在我们这个上层封装驱动中对 SoC 的 GMAC 设备寄存器锁进行初始化。
+
+然后是通过 `mdio_busX` 来找到两个网络控制器 GMAC 对应的 MDIO 总线设备节点 `device_node`，并找到已经初始化完成的 MDIO 总线结构体。
+
+再重新强调一次：**`phandle`就像指针，通过 `label: device@address` 或者 节点内部的 `phandle = <index>`(少见)来声明，其他节点通过 `<phandle-name> = <&label>`的方式来引用。使得一个节点可以通过 `phandle` 来获取其他节点的信息和资源**。
 
 ---
 
 ## 1.3. 字符设备操作
 
+### 1.3.1. 引用计数：open/release
 
+```c
+static int smi_open(struct inode *minode, struct file *mfile)
+{
+    try_module_get(THIS_MODULE);
+    return 0;
+} 
+```
+
+```c
+static int smi_release(struct inode *minode, struct file *mfile)
+{
+    module_put(THIS_MODULE);
+    return 0;
+}
+```
+
+这是 Linux 内核提供的用来增加和减少模块引用计数的标准接口。保证对模块的正确访问。
+
+一个很显然的问题。在 `open/release` 中只需要做这么简单的事情？不需要额外的配置和操作了吗？
+
+其实是因为我们驱动有一些特殊性：
+
+* 底层的 MDIO 总线访问接口已经自带了锁 (`mdio_lock` 和 交换芯片的 `reg_lock`)，多进程的并发访问是安全的，不需要 `open` 中进行额外的维护。
+* 硬件初始化/去初始化已经由 MDIO 总线设备驱动和交换芯片驱动完成了，这个字符设备只是提供"用户空间访问通道"，不需要额外的硬件状态管理。
+* 而模块引用计数是为了防止卸载时该通道还在使用，这是与字符设备提供的访问通道相关的，所以在 `open/release` 中实现。
+
+请注意：**不是所有的字符设备驱动都是这样的**。大多数字符设备驱动会做更多工作：分配私有数据、申请中断/时钟/内存、独占控制、重置硬件等。具体情况还是取决于设备需求。
+
+### 1.3.2. 核心交互：ioctl
+
+字符设备会在`/dev/`下创建一个字符设备，提供给用户空间使用。这里驱动的 `ioctl` 通过传入的 `cmd` 可以实现基本的寄存器独写来配置。
+
+```c
+static long smi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    smi_data_t smi_data;
+    int data;
+
+    switch (cmd)
+    {
+        case SMI_GET_REG:
+            if (copy_from_user(&smi_data, arg, sizeof(smi_data)))  
+                return -EFAULT;
+            if ((smi_data.busID < SMI_BUS_MAX) && (sys.smi_bus[smi_data.busID] != NULL))
+            {
+                data = mdiobus_read_nested(sys.smi_bus[smi_data.busID], smi_data.phyAddr, smi_data.regAddr);
+                smi_data.value = (u16)(data & 0xffff);
+
+                if (copy_to_user((void *)arg, &smi_data, sizeof(smi_data)))     
+                {
+                    printk("copy_to_user failed!\n");   
+                    return -EFAULT;
+                }
+            }
+            else
+            {
+                return -EINVAL;
+            }
+            break;
+        case SMI_SET_REG:
+            if (copy_from_user(&smi_data, arg, sizeof(smi_data)))  
+                return -EFAULT;
+            if ((smi_data.busID < SMI_BUS_MAX) && (sys.smi_bus[smi_data.busID] != NULL))
+            {
+                return mdiobus_write_nested(sys.smi_bus[smi_data.busID], smi_data.phyAddr, smi_data.regAddr, smi_data.value);
+            }
+            else
+            {
+                return -EINVAL;
+            }
+            break;
+        case SMI_LOCK_REG:
+            if (copy_from_user(&smi_data, arg, sizeof(smi_data)))  
+                return -EFAULT;
+            if (smi_data.devNum < SMI_DEV_NUM)
+            {
+                mutex_lock(sys.reg_lock[smi_data.devNum].semid);
+            }
+            break;
+        case SMI_UNLOCK_REG:
+            if (copy_from_user(&smi_data, arg, sizeof(smi_data)))  
+                return -EFAULT;
+            if (smi_data.devNum < SMI_DEV_NUM)
+            {
+                mutex_unlock(sys.reg_lock[smi_data.devNum].semid);
+            }
+            break;        
+        default :
+            break;
+    }
+    return 0;
+}
+```
+
+`smi_ioctl` 的传入参数有三个：
+
+* `struct file *file`：文件描述符对应的内核文件结构体，包含了该次打开的文件信息。通常不会再 `ioctl` 里直接使用。
+* `unsigned int cmd`：从用户空间传来的命令号。这个是在 `smi_bus.h` 中定义了。
+* `unsigned long arg`：用户空间传递的参数地址(是一个指针)。通常会指向一个 `smi_data_t` 结构体，驱动需要从用户空间拷贝到内核中。
+
+可以看到这里主要实现了四个命令：读/写，上锁/解锁。首先我们需要理解这个 `ioctl` 是谁在用。
+
+这是 **为Linux用户态程序提供一条直接访问底层 MDIO 总线(SMI接口)的通道**，用户态程序可以通过打开设备文件来实现对 指定 MDIO 总线(`busID`)上的指定设备(`phyAddr`)的指定寄存器(`regAddr`)进行读写操作。
+
+而用户态和内核态传递数据是使用一个 `smi_data_t` 的结构体将信息封装好，通过 `copy_from_user` 和 `copy_to_user` 来实现内核与用户态数据的传递。
+
+我们把精髓理解到位，就足够了，代码是比较清晰的。
 
 ---
