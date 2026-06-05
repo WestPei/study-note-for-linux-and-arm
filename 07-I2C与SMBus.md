@@ -4,18 +4,33 @@
 	- [1.3. 工作原理](#13-工作原理)
 	- [1.4. 数据传输流程](#14-数据传输流程)
 	- [1.5. 细节解析](#15-细节解析)
-- [2. SMBus协议](#2-smbus协议)
-	- [2.1. 历史渊源](#21-历史渊源)
-	- [2.2. I2C VS SMBus](#22-i2c-vs-smbus)
-	- [2.3. SMBus接口解析](#23-smbus接口解析)
-		- [2.3.1. 关于`swapped`](#231-关于swapped)
-		- [2.3.2. `i2c_smbus_read_byte()`](#232-i2c_smbus_read_byte)
-			- [2.3.2.1. I2C总线 锁](#2321-i2c总线-锁)
-			- [2.3.2.2. `__i2c_smbus_xfer()`](#2322-__i2c_smbus_xfer)
-			- [2.3.2.3. 追寻真正的硬件驱动函数](#2323-追寻真正的硬件驱动函数)
-			- [2.3.2.4. `i2c_smbus_xfer_emulated()`](#2324-i2c_smbus_xfer_emulated)
-			- [2.3.2.5. `__i2c_transfer()`](#2325-__i2c_transfer)
-			- [2.3.2.6. 再次回到硬件驱动](#2326-再次回到硬件驱动)
+- [2. I2C控制器: 从设备树到内核](#2-i2c控制器-从设备树到内核)
+	- [2.1. I2C 的设备地址](#21-i2c-的设备地址)
+		- [2.1.1. I2C 控制器地址](#211-i2c-控制器地址)
+		- [2.1.2. I2C 从设备地址](#212-i2c-从设备地址)
+	- [2.2. 设备树节点解析](#22-设备树节点解析)
+	- [2.3. I2C 控制器设备匹配驱动](#23-i2c-控制器设备匹配驱动)
+		- [2.3.1. `match`](#231-match)
+		- [2.3.2. `probe`](#232-probe)
+	- [2.4. I2C 控制器驱动匹配设备](#24-i2c-控制器驱动匹配设备)
+		- [2.4.1. 驱动源码](#241-驱动源码)
+		- [2.4.2. 向内核注册](#242-向内核注册)
+		- [2.4.3. 控制器驱动初始化](#243-控制器驱动初始化)
+	- [2.5. 小结](#25-小结)
+- [3. I2C 从设备: 注册与匹配](#3-i2c-从设备-注册与匹配)
+	- [3.1. 设备树到内核节点](#31-设备树到内核节点)
+- [4. SMBus协议](#4-smbus协议)
+	- [4.1. 历史渊源](#41-历史渊源)
+	- [4.2. I2C VS SMBus](#42-i2c-vs-smbus)
+	- [4.3. SMBus接口解析](#43-smbus接口解析)
+		- [4.3.1. 关于`swapped`](#431-关于swapped)
+		- [4.3.2. `i2c_smbus_read_byte()`](#432-i2c_smbus_read_byte)
+			- [4.3.2.1. I2C总线 锁](#4321-i2c总线-锁)
+			- [4.3.2.2. `__i2c_smbus_xfer()`](#4322-__i2c_smbus_xfer)
+			- [4.3.2.3. 追寻真正的硬件驱动函数](#4323-追寻真正的硬件驱动函数)
+			- [4.3.2.4. `i2c_smbus_xfer_emulated()`](#4324-i2c_smbus_xfer_emulated)
+			- [4.3.2.5. `__i2c_transfer()`](#4325-__i2c_transfer)
+			- [4.3.2.6. 再次回到硬件驱动](#4326-再次回到硬件驱动)
 
 
 ---
@@ -116,7 +131,368 @@ I2C总线技术最早由荷兰飞利浦半导体(现在的恩智浦NXP半导体)
 
 ---
 
-# 2. SMBus协议
+
+# 2. I2C控制器: 从设备树到内核
+
+## 2.1. I2C 的设备地址
+
+在硬件层面我们知道，SoC 比如我们的 rk3568 自带有 I2C 控制器，可以通过查看芯片手册来确定 I2C 控制器的内存地址。然后硬件方面设计会将 I2C 设备挂在 I2C 控制器下，也会有自己的地址。
+
+### 2.1.1. I2C 控制器地址
+
+以 rk3568 为例，我们直接查看官方的技术手册，一般会有一章 Address Mapping，里面会给出各类硬件的地址映射情况。我们这里去寻找 I2C2 这个控制器的地址。
+
+| Module | Start Address | Size |
+| ------ | ------------- | ---- |
+| I2C2   | 0xFE5B0000 | 64 KB |
+
+然后我们对应去看看设备树的节点：
+
+```c
+i2c2: i2c@fe5b0000 {
+		compatible = "rockchip,rk3568-i2c", "rockchip,rk3399-i2c";
+		reg = <0x0 0xfe5b0000 0x0 0x1000>;
+		interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru CLK_I2C2>, <&cru PCLK_I2C2>;
+		clock-names = "i2c", "pclk";
+		pinctrl-0 = <&i2c2m0_xfer>;
+		pinctrl-names = "default";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+```
+
+注意看节点的地址部分，是不是对应上了。一方面是节点名字中的 `i2c@fe5b0000`，另一个就是节点属性中的 `reg`。不过这里一共有四个地址。
+
+这里的地址是 SoC 访问片上 I2C 控制器的关键，这4个数组成了一个完整的64位的物理地址段：
+
+1. 第一个数 `0x0`：物理基地址的高32位。
+2. 第二个数 `0xfe5b0000`：物理基地址的低32位。
+3. 第三个数 `0x0`：地址长度的高32位。
+4. 第四个数 `0x1000`：地址长度的低32位。
+
+组合起来就是：
+* I2C2 控制器的寄存器其实物理地址为 `0x00000000 fe5b0000 = 0xfe5b0000`。
+* 它占用的地址空间长度为 `0x00000000 00001000 = 0x1000 字节 = 4096 KB`。
+
+
+### 2.1.2. I2C 从设备地址
+
+这里需要注意的是 I2C 从设备使用的是 7 位地址(少数使用 10 位)，这个地址一般是由 **芯片制造商**和**硬件电路设计者**共同决定。
+
+就拿我们使用的 max6635 温度传感器芯片为例。阅读芯片手册中关于地址选择的部分得知，max6635 的 7 位地址有 2 位可编程，这两位是后两位。具体引脚是：
+
+| PIN | NAME | FUNCTION |
+| --- | ---- | -------- |
+|  6  |  A1  | Address Pin |
+|  7  |  A0  | Address Pin |
+
+然后对应的具体硬件地址就有四个，这意味着同一根总线下可以通过可编程地址位实现 4 个传感器连接。
+
+| A1 | A0 | ADDRESS |
+| -- | -- | ------- |
+| GND | GND | 1001 000 |
+| GND | Vcc | 1001 001 |
+| Vcc | GND | 1001 010 |
+| Vcc | Vcc | 1001 011 |
+
+我们将这 7 位地址转换为 16 进制就可以知道 max6635可以使用的地址为 `0x48`，`0x49`，`0x4a`，`0x4b`。
+
+我们同样的如果要在 I2C2 控制器下增加这么一个 max6635 设备节点，其对应的地址就应该是这四个中的一个，至于是哪一个需要根据硬件原理图来确定。
+
+```c
+&i2c2 {
+	max6635: hwmon@48 {
+		compatible = "national,max6635";
+		reg = <0x48>;
+		
+		//硬件需要做更正，alert和critial中断线需要处于一个中断源，
+		//因为一个中断源对应着一个时钟源，而一个普通监管设备一般只有一个时钟源
+		//interrupt-names = "alert", "critical";
+		//interrupts = <RK_PC2 IRQ_TYPE_LEVEL_LOW>, <RK_PA5 IRQ_TYPE_LEVEL_LOW>;
+		#thermal-sensor-cells = <0>;
+	};
+}
+```
+
+这里是一个已经写好的地址，可以看到这里配置好的地址为 `0x48`。符合硬件的要求。
+
+## 2.2. 设备树节点解析
+
+Bootloader 阶段会将编译好的设备树二进制文件(.dtb)的地址通过寄存器传递给内核。我们在自己使用 `booti` 启动内核时会将设备树加载到内存，然后作为参数调用 `booti`。
+
+而在内核早期的启动阶段，大概是这样的：
+
+```c
+start_kernel()	/* init/main.c */
+	→ setup_arch()	/* arch/arm64/kernel/setup.c */
+		→ unflatten_device_tree() /* drivers/of/fdt.c */
+```
+
+这个函数会将结构化的二进制`.dtb`文件展开成内核可以理解的一系列 `struct device_node` 数据结构。
+
+在之后，ARM64架构下，内核会通过一个 `arch_initcal_sync` 级别的函数来触发设备树向平台设备(`platform_device`)的转换。核心入口在 `drivers/of/platform.c` 中的 `of_platform_populate_init()`。
+
+```c
+arch_initcall_sync(of_platform_default_populate_init);
+```
+
+> `arch_initcall_sync` 是 Linux 内核初始化过程的一个重要机制，用于标记并组织那些与体系结构相关，且需要在同步阶段执行的初始化函数。它确保了内核组件以预定的顺序完成初始化。
+> 内核启动时 `do_initcalls()` 会按顺序遍历每一个 `initcall` 级别中的函数，同级别的所有普通函数执行完之后，就会执行同一级别的同步函数 `*_sync`
+
+我们先不管这个 `arch_initcall_sync` 具体的调用情况，但是它肯定是发生在设备树文件解析之后的。我们接下来直接看平台设备的解析。
+
+```c
+// 文件: drivers/of/platform.c
+of_platform_default_populate_init()
+    └─> of_platform_default_populate(NULL, NULL, NULL)
+        └─> of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL)
+            └─> of_platform_bus_create()
+                └─> of_platform_device_create_pdata()
+                    └─> of_device_alloc()
+                        └─> platform_device_alloc()
+                        └─> of_device_add_properties()
+                    └─> platform_device_add()
+                        └─> device_add()
+```
+
+这个过程中最重要的两个函数是：
+
+* `of_platform_bus_create()`：递归创建设备树节点对应的平台设备。
+
+* `of_platform_device_create_pdata()`：将单个节点转换为 platform_device。
+
+最终，当遍历到你的 i2c2 节点时，系统会根据节点信息(如 `reg`、`interrupts`)填充 `struct resource` 结构体，并最终调用 `platform_device_add()`。
+
+这个过程会在 `/sys/devices/platform/` 下产生一个类似 `fe5b0000.i2c` 的目录项，表示该硬件对应的抽象平台设备已经建立。
+
+## 2.3. I2C 控制器设备匹配驱动
+
+完成了 I2C 控制器的设备树节点解析后，它就已经成为了一个在内核中拥有 `platform_device` 结构体，并且在 `sysfs` 中能够找到对应路径的平台设备了。
+
+接下来就是总线的驱动匹配了。我们的驱动是提前编译进内核的，所以应该是设备进行注册，然后去匹配。而我们在前面的流程中可以注意到，触发总线匹配的核心是 `device_add`。这一步完成设备的注册和与驱动的绑定。
+
+我们可以将这一步分成两个部分， `match` 和 `probe`。
+
+### 2.3.1. `match`
+
+其中会调用 `bus_probe_device()`：
+
+```c
+void bus_probe_device(struct device *dev)
+{
+	struct bus_type *bus = dev->bus;
+	struct subsys_interface *sif;
+
+	if (!bus)
+		return;
+
+	if (bus->p->drivers_autoprobe)
+		device_initial_probe(dev);
+
+	mutex_lock(&bus->p->mutex);
+	list_for_each_entry(sif, &bus->p->interfaces, node)
+		if (sif->add_dev)
+			sif->add_dev(dev, sif);
+	mutex_unlock(&bus->p->mutex);
+}
+```
+
+然后就是这样一个调用顺序：
+```c
+device_initial_probe()
+	__device_attach()
+		bus_for_each_drc()
+			__device_attach_driver()
+				driver_match_device()
+```
+在 `driver_match_driver()` 中会触发驱动对应总线的 `match`函数，完成设备与驱动的匹配，然后就是运行 `probe` 了。
+
+### 2.3.2. `probe`
+
+在 `__device_attach_driver()` 中，完成了 `match` 后，会触发:
+
+```c
+driver_probe_device()
+	__driver_probe_device()
+		really_probe()
+			call_driver_probe()
+```
+
+在 `call_driver_probe()` 中：
+
+```c
+/* struct device *dev, struct device_driver *drv */
+if (dev->bus->probe)
+	ret = dev->bus->probe(dev);
+else if (drv->probe)
+	ret = drv->probe(dev);
+```
+
+可以看到有两条路：
+
+* 如果设备总线有对应的 `probe`，那就调用它。
+* 如果没有，那就调用对应的 `drv` 的 `probe`。
+
+而总线的 `probe` 函数比较好查阅，一般都是实现总线的基本初始化，然后找到对应的设备驱动(就是 `struct device_driver` 的子类，比如我们自己写的设备驱动 `i2c_driver`)，调用我们写的 `i2c_driver->probe`。这条路还是比较清晰的，总线先进行通用的初始化，然后调用对应总线设备驱动的特定初始化。
+
+不过可以看到这里还有另一条路子，这条路子其实不太常见，因为它是 `dev->bus->probe` 不存在的时候，现代 Linux 的总线基本都有自己的 `probe`，这条路子更像是做兼容，可能有一些设备或者驱动并没有总线对应，所以 `probe` 直接挂在 `drv` 下而不是总线下。
+
+其实到这里，基本上就完成了一个设备的注册流程了。我们这里假定驱动先就绪，设备后来并触发匹配注册流程。大致跟踪了一下源码了解了流程。
+
+## 2.4. I2C 控制器驱动匹配设备
+
+实际上 设备-总线-驱动 模型的匹配注册是可以双向的。我们看了从设备节点出发的注册流程，我们也可以从驱动出发来看看是怎么与设备节点匹配的。
+
+### 2.4.1. 驱动源码
+
+如何查找设备树中的设备对应的驱动源码？如果是一个已经写好的设备树，我们可以直接找到设备节点的 `compatible` 属性：
+
+```c
+i2c2: i2c@fe5b0000 {
+	compatible = "rockchip,rk3568-i2c", "rockchip,rk3399-i2c";
+	...
+}
+```
+
+现代 Linux 大多都是通过匹配 `compatible` 的字段来实现设备与驱动的关联的。因为我们可以直接在 `drivers` 目录下查找这里的两个字段(分别找)，最后找到了：
+
+```c
+/* drivers/i2c/busses/i2c-rk3x.c */
+static const strcut of_device_id rk3x_i2c_match[] = {
+	...
+	{
+		.compatible = "rockchip,rk3399-i2c",
+		.data = &rk3399_soc_data
+	},
+}
+```
+
+这里 `drivers/i2c/busses/i2c-rk3x.c` 就是驱动源码的所在。直接看源码的末尾，找到对应驱动结构体的定义：
+
+```c
+static struct platform_driver rk3x_i2c_driver = {
+	.probe   = rk3x_i2c_probe,
+	.remove  = rk3x_i2c_remove,
+	.driver  = {
+		.name  = "rk3x-i2c",
+		.of_match_table = rk3x_i2c_match,
+		.pm = &rk3x_i2c_pm_ops,
+	},
+};
+module_platform_driver(rk3x_i2c_driver);
+```
+
+这里定义了 I2C 控制器的基本信息和初始化函数。
+
+### 2.4.2. 向内核注册
+
+内核中提供了平台驱动的通用注册宏 `module_platform_driver(x)`：
+
+```c
+#define module_platform_driver(__platform_driver) \
+	module_driver(__platform_driver, platform_driver_register, \
+			platform_driver_unregister)
+```
+
+实际的平台驱动注册为 `platform_driver_register`，它内部调用了 `__platform_driver_register`：
+
+```c
+/* drivers/base/platform.c */
+int __platform_driver_register(struct platform_driver *drv,
+				struct module *owner)
+{
+	drv->driver.owner = owner;
+	drv->driver.bus = &platform_bus_type;
+
+	return driver_register(&drv->driver);
+}
+```
+
+几乎所有的总线驱动注册都是类似的，设置 `drv->driver.owner` 和 `drv->driver.bus`，然后调用 `driver_register`。
+
+```c
+/* drivers/base/driver.c */
+int driver_register(struct device_driver *drv)
+{
+	int ret;
+	struct device_driver *other;
+
+	if (!drv->bus->p) {
+		pr_err("Driver '%s' was unable to register with bus_type '%s' because the bus was not initialized.\n",
+			   drv->name, drv->bus->name);
+		return -EINVAL;
+	}
+
+	if ((drv->bus->probe && drv->probe) ||
+	    (drv->bus->remove && drv->remove) ||
+	    (drv->bus->shutdown && drv->shutdown))
+		pr_warn("Driver '%s' needs updating - please use "
+			"bus_type methods\n", drv->name);
+
+	other = driver_find(drv->name, drv->bus);
+	if (other) {
+		pr_err("Error: Driver '%s' is already registered, "
+			"aborting...\n", drv->name);
+		return -EBUSY;
+	}
+
+	ret = bus_add_driver(drv);
+	if (ret)
+		return ret;
+	ret = driver_add_groups(drv, drv->groups);
+	if (ret) {
+		bus_remove_driver(drv);
+		return ret;
+	}
+	kobject_uevent(&drv->p->kobj, KOBJ_ADD);
+	deferred_probe_extend_timeout();
+
+	return ret;
+}
+```
+
+核心就是将驱动给注册到总线上：`bus_add_driver` 与 `driver_add_groups`。同时会创建 `sysfs` 下的目录和项。
+
+而在 `bus_add_drvier` 中，会触发 `driver_attach` -> `__driver_attach`。是不是长得很眼熟，因为在设备侧也有一个 `__device_attach`。
+
+与`__device_attach`的行为非常相似，在 `__driver_attach` 中同样也是调用了 `driver_match_device` 来进行驱动与设备的匹配，然后调用 `driver_probe_device` 来进行初始化。这下是真的殊途同归了。无论从设备侧还是驱动侧都完成了同样的注册、匹配与初始化。
+
+### 2.4.3. 控制器驱动初始化
+
+在完成了平台设备与驱动的匹配和基本的初始化后，就会进入到我们的具体驱动中运行特定的 `probe`。
+
+根据 [probe](#232-probe) 小结，在对应的总线 `probe` 中，会调用具体驱动的 `driver->probe`。这里面才是 I2C 控制器驱动自己的初始化。
+
+
+
+
+
+---
+
+## 2.5. 小结
+
+看到这里可能又会犯一些迷糊。
+
+我们在这一章讲的是 SoC 上自带的 I2C 控制器，**不是 I2C 从设备**。在内核视角中 I2C 控制器是一个平台总线设备(`platform_device`)，它对应的驱动也是一个平台驱动(`platform_driver`)。
+
+而我们的 I2C 从设备是一个 I2C 总线设备，它在内核中对应的设备结构体是 `i2c_client`。对应的驱动也是叫做 `i2c_driver`。
+
+而它们之间有一个很重要的结构体是 `i2c_adapter`，它是控制器中负责与从设备打交道的核心，这也是实际进行 I2C 通信的关键，在 [SMBus接口解析](#33-smbus接口解析) 中我们会进一步去解析它。
+
+我们完成了 I2C 控制器的设备驱动的初始化，肯定还得完成从设备与驱动的初始化，其实流程与 平台设备的也很类似了，但是总是会有一些自己特有的操作。
+
+# 3. I2C 从设备: 注册与匹配
+
+## 3.1. 设备树到内核节点
+
+
+
+
+---
+
+# 4. SMBus协议
 
 有博客专门讲解该协议(Linux API)：[SMBus协议概述](https://zhuanlan.zhihu.com/p/14697706607)
 
@@ -131,14 +507,14 @@ D老师告诉我：
 
 ---
 
-## 2.1. 历史渊源
+## 4.1. 历史渊源
 
 * **SMBus 基于 I2C 发展而来**：SMBus 是由 Intel 在 1995 年基于 I2C 协议定义的。它的初衷是解决 PC 主板上低速设备(如温度、电压监控)的通信需求，提供一条标准化、低成本的系统管理通道。由于直接复用了 I2C 的物理层和基本通信机制，所以两者是同根同源。
 * **在 Linux 内核中遵循 “SMBus优先” 原则**：Linux 内核对 I2C/SMBus 设备的驱动开发有明确的指导。首要原则是优先使用 SMBus 协议命令，因为对于只使用 SMBus 子集功能的 I2C 设备，这样做能保证驱动在纯 SMBus 适配器上也能工作。同时，内核也提供了良好的兼容层，如果设备确实需要使用超出 SMBus 范围的 I2C 高级特性，也可以使用最原始的 i2c_transfer 接口。
 
 ---
 
-## 2.2. I2C VS SMBus
+## 4.2. I2C VS SMBus
 
 D老师为我总结了一个表格，将二者进行了一个对比：
 
@@ -163,13 +539,13 @@ D老师为我总结了一个表格，将二者进行了一个对比：
 
 ---
 
-## 2.3. SMBus接口解析
+## 4.3. SMBus接口解析
 
 在阅读驱动源码时，一般指看到了源码中的api调用层，没有继续往下探究了，我在看`lm92.c`时，里面的各种`i2c_smbus_*`接口并没有进去看，现在来补一补，了解一下I2C总线的电气特性是如何在软件层面实现的。
 
 ---
 
-### 2.3.1. 关于`swapped`
+### 4.3.1. 关于`swapped`
 
 在这里有两个稍微特殊一点的接口：`i2c_smbus_read_word_swapped()`和`i2c_smbus_write_word_swapped()`。
 
@@ -205,7 +581,7 @@ i2c_smbus_write_word_swapped(const struct i2c_client *client,
 
 ---
 
-### 2.3.2. `i2c_smbus_read_byte()`
+### 4.3.2. `i2c_smbus_read_byte()`
 
 现在来正式看看这些协议实现，首先从I2C_SMBUS读一个字节开始，就是`i2c_smbus_read_byte()`：
 
@@ -281,7 +657,7 @@ EXPORT_SYMBOL(i2c_smbus_xfer);
 
 ---
 
-#### 2.3.2.1. I2C总线 锁
+#### 4.3.2.1. I2C总线 锁
 
 这里咱们进`__i2c_lock_bus_helper()`里看看：
 
@@ -356,7 +732,7 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 
 ---
 
-#### 2.3.2.2. `__i2c_smbus_xfer()`
+#### 4.3.2.2. `__i2c_smbus_xfer()`
 
 现在回过头去看`i2c_smbus_xfer()`中的真正实现功能的函数`__i2c_smbus_xfer()`。
 
@@ -393,7 +769,7 @@ s32 __i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 
 ---
 
-#### 2.3.2.3. 追寻真正的硬件驱动函数
+#### 4.3.2.3. 追寻真正的硬件驱动函数
 
 我们可能得找一找咱们的I2C控制器的驱动。从设备树中找吧。这里我们一步一步查，在
 * rk3568-ok3568c.dts
@@ -448,7 +824,7 @@ static const struct i2c_algorithm rk3x_i2c_algorithm = {
 
 ---
 
-#### 2.3.2.4. `i2c_smbus_xfer_emulated()`
+#### 4.3.2.4. `i2c_smbus_xfer_emulated()`
 
 ```c
 /*
@@ -545,7 +921,7 @@ static s32 i2c_smbus_xfer_emulated(struct i2c_adapter *adapter, u16 addr,
 
 ---
 
-#### 2.3.2.5. `__i2c_transfer()`
+#### 4.3.2.5. `__i2c_transfer()`
 
 这里没有放完整的代码，只放了一些代码片段。
 
@@ -595,7 +971,7 @@ int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 
 ---
 
-#### 2.3.2.6. 再次回到硬件驱动
+#### 4.3.2.6. 再次回到硬件驱动
 
 其实也是可预见的，当我们发现没有对应的SMBus的驱动函数，要用软件模拟的时候，最后肯定就是用`i2c_algorithm`结构体中的标准I2C协议驱动来模拟咯，只是外面套了一层实现SMBus协议的壳子。现在我们就来看看操作函数指针`master_xfer)_`对应的`rk3x_i2c_xfer`吧。
 
