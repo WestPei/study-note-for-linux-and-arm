@@ -19,6 +19,7 @@
 	- [2.5. 小结](#25-小结)
 - [3. I2C 从设备: 注册与匹配](#3-i2c-从设备-注册与匹配)
 	- [3.1. 设备树到内核节点](#31-设备树到内核节点)
+	- [3.2. 从设备 probe](#32-从设备-probe)
 - [4. SMBus协议](#4-smbus协议)
 	- [4.1. 历史渊源](#41-历史渊源)
 	- [4.2. I2C VS SMBus](#42-i2c-vs-smbus)
@@ -31,6 +32,11 @@
 			- [4.3.2.4. `i2c_smbus_xfer_emulated()`](#4324-i2c_smbus_xfer_emulated)
 			- [4.3.2.5. `__i2c_transfer()`](#4325-__i2c_transfer)
 			- [4.3.2.6. 再次回到硬件驱动](#4326-再次回到硬件驱动)
+- [5. MMIO：CPU 与 外设寄存器的交互](#5-mmiocpu-与-外设寄存器的交互)
+	- [5.1. 回顾一下](#51-回顾一下)
+		- [5.1.1. 啥是 MMIO](#511-啥是-mmio)
+		- [5.1.2. 为什么会使用 MMIO](#512-为什么会使用-mmio)
+	- [5.2. 小结](#52-小结)
 
 
 ---
@@ -307,6 +313,7 @@ device_initial_probe()
 			__device_attach_driver()
 				driver_match_device()
 ```
+
 在 `driver_match_driver()` 中会触发驱动对应总线的 `match`函数，完成设备与驱动的匹配，然后就是运行 `probe` 了。
 
 ### 2.3.2. `probe`
@@ -465,8 +472,89 @@ int driver_register(struct device_driver *drv)
 
 根据 [probe](#232-probe) 小结，在对应的总线 `probe` 中，会调用具体驱动的 `driver->probe`。这里面才是 I2C 控制器驱动自己的初始化。
 
+查看 `drivers/i2c/busses/i2c-rk3x.c` 中的 `probe` 部分，可以看到内核分配好控制器的私有结构 `rk3x_i2c` 后，就是从硬件解析中获取信息，比如：
 
+```c
+	/* 匹配芯片数据 */
+	i2c->soc_data = (struct rk3x_i2c_soc_data *)device_get_match_data(&pdev->dev);
 
+	/* 获取I2C总线ID号 */
+	ret = rk3x_i2c_acpi_get_bus_id(&pdev->dev, i2c);
+	if (ret < 0) {
+		ret = rk3x_i2c_of_get_bus_id(&pdev->dev, i2c);
+		if (ret < 0)
+			return ret;
+	}
+
+	i2c->adap.nr = ret;
+	
+	/* 解析I2C的时序参数 */
+	i2c_parse_fw_timings(&pdev->dev, &i2c->t, true);
+```
+
+**匹配芯片数据**：这里，我们先不去究细节。由于内核驱动一般可以匹配多个不同的芯片，所以这里其实就是在 `probe` 时让本次驱动与芯片型号对应上，然后获取与芯片选相关的结构体，我们可以在这个源文件中看到当初的 `<compatible>` 字段还有一段：
+
+```c
+	{
+		.compatible = "rockchip,rk3399-i2c",
+		.data = &rk3399_soc_data
+	},
+```
+
+这里这个 `rk3399_soc_data` 就是我们 rk3568 匹配到驱动后找到的兼容数据结构体。具体是如何去实现的，内核提供了一个比较复杂的机制，因为设备因为使用 ACPI/设备树时，会解析成不同的结构体，所以内核基础设施中给了一个通用的接口 `device_get_match_data` 来获取这个芯片信息。
+
+**获取总线 ID 号**：一般一个 SoC 中不只有一个 I2C 控制器，那么自然就需要为多个控制器进行编号，这个在设备树中是能够看到的。然后会将这个编号赋给 真实总线控制器对应的数据结构 `i2c_adapter.nr` 中。  
+
+**解析时序参数**：`i2c_parse_fw_timings` 是一个内核辅助函数，它会从系统固件中读取 I2C 总线的时序参数，并且填充到 `struct i2c_timings` 结构体中，这个结构体被保存在 I2C 控制器的私有数据中。这个函数会从 ACPI 或设备树节点中获取一些标准属性，如果没有指定的话，通过传入的 `use_default == true` 来填入一个缺省值，保证时序。
+
+接着是 I2C 适配器的初始化。这个我认为就是 I2C 控制器在内核中的功能抽象，一个物理 I2C 控制器就会对应一个 `struct i2c_adapter`。
+
+```c
+	strscpy(i2c->adap.name, "rk3x-i2c", sizeof(i2c->adap.name));
+	i2c->adap.owner = THIS_MODULE;
+	i2c->adap.algo = &rk3x_i2c_algorithm;
+	i2c->adap.retries = 3;
+	i2c->adap.dev.of_node = pdev->dev.of_node;
+	i2c->adap.algo_data = i2c;
+	i2c->adap.dev.parent = &pdev->dev;
+	i2c->adap.dev.fwnode = fw;
+```
+
+一些与外设驱动类似的地方我们就掠过了，我们来看一看新东西：`ioremap`。似乎这又是一个比较核心的概念，单独开一个章节吧：[CPU 与外设寄存器的交互](#5-mmiocpu-与-外设寄存器的交互)。
+
+**中断的获取和配置**：
+
+```c
+/* 中断号获取 */
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+	i2c->irq = irq;
+```
+
+这里的第二个参数 `0` 是一个中断索引，表示获取该平台设备的 第 `<index>` 个中断。因为一个设备可能会有多个中断，用来处理不同的事物。
+
+```c
+/* 注册中断处理函数 */
+ret = devm_request_irq(&pdev->dev, irq, rk3x_i2c_irq,
+			       0, dev_name(&pdev->dev), i2c);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "cannot request IRQ\n");
+		return ret;
+	}
+```
+
+**复位控制器获取**：
+
+```c
+i2c->reset = devm_reset_control_get(&pdev->dev, "i2c");
+```
+
+具体的原理我也没太搞懂，但是获取复位控制器后，驱动可以通过这个 `handle` 来软复位设备。
+
+和时钟的配置和 适配器 `adapter` 的注册。时钟这一块我还不太了解，先不去深究了。
+
+关于 `adapter` 的注册，这里使用的是 `i2c_add_numbered_adapter`，他会静态地指定总线编号，因为这个控制器是 rk3568 片上自带的，已经实现编号了，比如是 I2C2，所以要直接使用这个编号而不是由内核动态地分配总线编号。
 
 
 ---
@@ -479,7 +567,7 @@ int driver_register(struct device_driver *drv)
 
 而我们的 I2C 从设备是一个 I2C 总线设备，它在内核中对应的设备结构体是 `i2c_client`。对应的驱动也是叫做 `i2c_driver`。
 
-而它们之间有一个很重要的结构体是 `i2c_adapter`，它是控制器中负责与从设备打交道的核心，这也是实际进行 I2C 通信的关键，在 [SMBus接口解析](#33-smbus接口解析) 中我们会进一步去解析它。
+而它们之间有一个很重要的结构体是 `i2c_adapter`，它是控制器中负责与从设备打交道的核心，这也是实际进行 I2C 通信的关键，在 [SMBus接口解析](#43-smbus接口解析) 中我们会进一步去解析它。
 
 我们完成了 I2C 控制器的设备驱动的初始化，肯定还得完成从设备与驱动的初始化，其实流程与 平台设备的也很类似了，但是总是会有一些自己特有的操作。
 
@@ -487,8 +575,95 @@ int driver_register(struct device_driver *drv)
 
 ## 3.1. 设备树到内核节点
 
+其实我们完成了 I2C 控制器的流程解析后，再来看从设备的流程会清晰不少。还是从设备树入手，这里以我们现在最熟悉的 max6635 温度传感器说起吧，前辈已经配置好了设备树内的节点，不过似乎是有一些小问题的， max6635 支持温度超过阈值后向内核发送中断请求，这需要硬件连接，目前没有实现。
 
+```c
+max6635: hwmon@48 {
+	compatible = "national,max6635";
+	reg = <0x48>;
+	
+	//硬件需要做更正，alert和critial中断线需要处于一个中断源，
+	//因为一个中断源对应着一个时钟源，而一个普通监管设备一般只有一个时钟源
+	//interrupt-names = "alert", "critical";
+	//interrupts = <RK_PC2 IRQ_TYPE_LEVEL_LOW>, <RK_PA5 IRQ_TYPE_LEVEL_LOW>;
+	#thermal-sensor-cells = <0>;
+};
+```
 
+**注意**，这个节点是挂在 I2C2 节点之下的，这是由硬件电路图决定的。设备树的节点解析步骤应该和控制器类似，不过从设备是 I2C 总线设备而不是平台总线设备，
+
+我们已经知道了那些直接挂在平台总线的设备，如 I2C 控制器和各类总线控制器，都是在内核初始化阶段去解析 `of_node` 从而得到 `platform_device`。而在此之前内核已经将所有的设备树节点按照其结构解析成了一个 `of_node` 树。
+
+这时候所有的平台设备都被解析，并且注册到了内核中，有了自己的 `device` 结构，**那么那些挂在总线上的各个总线设备又是什么时候被解析并注册的呢**？
+
+答案就在各个总线控制器驱动的 `probe` 中。在 [控制器驱动初始化](#243-控制器驱动初始化) 中，我们有提到在最后会调用 `i2c_add_numbered_adapter()`，它是在为控制器分配一个静态总线序号，并且向内核注册控制器。
+
+如果我们在设备树中给定了控制器序号，那么内部会调用 `__i2c_add_numbered_adapter()`。这个函数除了会分配 `idr` ，还会调用 `i2c_register_adapter()`。这个函数就是关键。
+
+```c
+static int i2c_register_adapter(struct i2c_adapter *adap)
+{
+	int res = -EINVAL;
+	...
+	dev_set_name(&adap->dev, "i2c-%d", adap->nr);
+	adap->dev.bus = &i2c_bus_type;
+	adap->dev.type = &i2c_adapter_type;
+	res = device_register(&adap->dev);
+	...
+	/* create pre-declared device nodes */
+	of_i2c_register_devices(adap);
+	...
+}
+```
+
+这个函数前面是在向内核注册 `adapter` 本身，而 `of_i2c_register_devices()` 就是在尝试向内核注册挂在该 I2C 控制器下的设备节点了。
+
+```c
+void of_i2c_register_devices(struct i2c_adapter *adap)
+{
+	struct device_node *bus, *node;
+	struct i2c_client *client;
+
+	/* Only register child devices if the adapter has a node pointer set */
+	if (!adap->dev.of_node)
+		return;
+
+	dev_dbg(&adap->dev, "of_i2c: walking child nodes\n");
+
+	bus = of_get_child_by_name(adap->dev.of_node, "i2c-bus");
+	if (!bus)
+		bus = of_node_get(adap->dev.of_node);
+
+	for_each_available_child_of_node(bus, node) {
+		if (of_node_test_and_set_flag(node, OF_POPULATED))
+			continue;
+
+		client = of_i2c_register_device(adap, node);
+		if (IS_ERR(client)) {
+			dev_err(&adap->dev,
+				 "Failed to create I2C device for %pOF\n",
+				 node);
+			of_node_clear_flag(node, OF_POPULATED);
+		}
+	}
+
+	of_node_put(bus);
+}
+```
+
+这段代码应该还是比较清晰的，在 `of_i2c_register_device()` 中将控制器下的 I2C 从设备注册到内核，并创建一个对应的 `i2c_client` 结构体，这不就连上了嘛。
+
+然后在 `device_register() -> device_add()` 中进行同样的步骤，向内核注册，并且出发对应总线的 `probe`，再触发设备驱动的 `probe`。这一套流程与平台总线是一样的，甚至调用的接口函数都是一样的。
+
+## 3.2. 从设备 probe
+
+设备的 `probe` 都是通过 `device_add()` 这个核心接口调用的。它本身是设备向内核注册的第二步，而完成注册后自然就是去寻找与之匹配的设备驱动咯。这一点在前文中也是反复提到了，具体可以去看 [设备与驱动的匹配](#23-i2c-控制器设备匹配驱动)。
+
+作为驱动开发者，一般比较关心的就是实际设备的驱动部分，而其中的核心就有设备层面的 `probe`。它一般是在总线层 `probe` 之后被调用。此时内核已经完成了该设备内核结构体的创建，并且传入到 `probe` 中。我们要做的就是为设备定义私有结构体，并与从设备的内核结构体绑定，比如 I2C 的就是 `struct i2c_client`。
+
+在 `probe` 中除了在内核中创建私有数据结构体以外，比较重要的就是设备本身的初始化了，这个随设备变化。
+
+到这里我们基本就了解了一个总线从控制器到从设备是如何一步步在内核中初始化注册的了。
 
 ---
 
@@ -1033,3 +1208,66 @@ static int rk3x_i2c_xfer(struct i2c_adapter *adap,
 如果感兴趣的话也可以继续往`rk3x_i2c_setup()`中看，以及看`rk3x_i2c_xfer_common()`本身。
 
 不过到这里我觉得已经差不多了。
+
+---
+
+# 5. MMIO：CPU 与 外设寄存器的交互
+
+## 5.1. 回顾一下
+
+### 5.1.1. 啥是 MMIO
+
+这里我们需要先回顾一下一个完整的计算机的物理地址与虚拟地址空间。还记得设备树中的设备节点结构吗：
+
+```c
+	<dev>@<addr>
+```
+
+其中我们的 I2C2 控制器这一个 SoC 自带的外设节点是这样的：
+
+```c
+	i2c2: i2c@fe5b0000 {
+		compatible = "rockchip,rk3568-i2c", "rockchip,rk3399-i2c";
+		reg = <0x0 0xfe5b0000 0x0 0x1000>;
+		interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru CLK_I2C2>, <&cru PCLK_I2C2>;
+		clock-names = "i2c", "pclk";
+		pinctrl-0 = <&i2c2m0_xfer>;
+		pinctrl-names = "default";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+```
+
+这里的这个 `fe5b0000` 其实是 SoC 的**物理总线地址**，这是 SoC 的芯片手册中规定的(当然还有挂在总线下的其他设备，这些设备没有直接挂在 SoC 上，CPU 访问时也是走总线控制器访问，它们的节点地址表示的是在对应总线上的地址，但是这也是真实的地址)。
+
+对 SoC 来说，本身在封装时就有很多设备连接在核心上，核心想要访问这些设备时实际上就是使用这个**物理总线地址**。当然这是最底层的，架构指令集在访问设备时的操作。
+
+但是内核中不是这么简单地使用这些地址的，它在开启页表后使用的都是虚拟地址，这个虚拟地址空间对于 32 位机有 4GB，而对于 64 位机就很大了。虚拟地址会通过 mmu 进行翻译，进而操作对应的硬件，比如 RAM 或者实际的外设。
+
+而对于这些平台总线设备，它们的地址就是 SoC 的物理总线地址，同样也会被翻译成虚拟地址，不过会被单独放在一个区域内，就叫做 MMIO。通过将硬件的地址映射到虚拟地址空间中(统一的地址空间，被内核都视作内存地址)，CPU可以直接像访问普通内存一样使用 load/store 与这些映射过来的硬件进行交互。
+
+x86 体系下似乎有一个专门的 I/O 空间，它们是一个独立的地址空间，与虚拟地址空间独立。它们拥有单独的访问指令。而在 arm 架构下似乎都被统一了，使用 MMIO 统一成内存访问了。
+
+讲了这么多其实就是想说，对于这些片上外设(平台总线设备)，它们都会通过 MMIO 将地址映射，与内存统一在一个地址空间下！其实现代设备基本都是用这一套思路了。
+
+### 5.1.2. 为什么会使用 MMIO
+
+我自己其实有一点迷糊，想要理清一下思路。最早的计算机可以看作就是一个 CPU + 内存，数据不断地从内存中存取，由 CPU 进行计算。所以最早的所谓地址，就指的是内存地址。CPU 从内存的一个具体地址处取出/存放数据。
+
+但是随着计算机发展，会有外围设备接入计算机，计算机 CPU 想要访问这些外设，肯定得需要一个统一的方式，总不能一个设备一套指令吧。大致的雏形就是访问和读写外设的寄存器。那么这个寄存器要访问肯定也需要有地址吧。
+
+x86 架构下对于 I/O 设备有一套单独的地址空间 + 操作指令，这样就将内存地址空间与设备地址空间给分开了，自己有自己的玩法。
+
+而现代 arm 架构下也不知是为了什么(可能为了指令集精简或者别的什么原因)，使用了一个统一的地址空间。通过将外设的地址映射到内存空间中，像操作普通内存一样直接直接操作外设的寄存器。
+
+这里我想要强调的是：这个空间本身是内存，也就是 RAM 独有的！虽然也经过了虚拟地址的中转，但是本质上一个内存地址对应的就是 RAM 的一个内存区域。
+
+而通过 MMIO 统一的外设地址，虽然也是在虚拟地址空间下有了自己的虚拟地址，但是这个虚拟地址指向的是设备的寄存器，核心访问的也是寄存器。
+
+## 5.2. 小结
+
+如果没有太看明白就直接看结论就好。MMIO 就是现代计算机的一种外设访问方式。传统的外设有自己的一套方式：I/O 空间和对应的操作指令(架构层面的)。现代计算机基本摈弃了这一套，而是将外设的寄存器地址空间直接映射到内存地址空间中(反正内存自己也用不完这个地址， 64位地址呢！)，并且可以直接通过访问内存的指令来访问外设，显然这也会简化编译(原来是两套，现在合并到一起了)。
+
+因此在高层视角下，所有的设备都可以在一个地址空间中寻址，并且都使用页表和 MMU 进行寻址。MMIO 区域稍显特殊，上层还是直接用访问内存的方式操作，但是底层则会进行翻译(似乎会直接涉及到硬件)。
