@@ -168,6 +168,8 @@ CompileFlags:
 
 不过有了 `compile_commands.json`，即使是因为 `clangd` 兼容不了，也可以直接使用 VScode 的 `C/C++` 插件来实现跳转，只是每一次打开都需要重新加载，速度会比较慢，不过能用了。以后更换高版本的 U-boot 了再说吧。
 
+这里记录一下，`bear` 用来生成 `compile_commands.json` 不太靠谱，似乎环境变量有问题，会报错。所以可以尝试使用一个叫做 `intercept-build` 的工具命令。
+
 ---
 
 # 4. U-boot 深入
@@ -348,12 +350,18 @@ aarch64-linux-gnu-nm arch/arm/lib/built-in.o | grep _main
 aarch64-linux-gnu-objdump -t arch/arm/lib/built-in.o | grep _main
 ```
 
+这里为啥要去找这个 `main_loop()` 呢？因为这个函数应该是和我们打交道的，它也在一个非常权威的位置：`common/main.c`。一看就像是那种一个工程的入口点。
+
 通过 `u-boot.map` 发现 `_main` 来自 `arch/arm/lib/built-in.o`，而非 `common/main.o`——说明 `_main` 和 `main_loop()` 是两个不同的入口点，`_main` 是汇编阶段的入口，`main_loop()` 是进入 C 语言后的主循环入口。
 
-`built-in.o` 是目录级聚合的目标文件（由该目录下所有 `.o` 文件合并而成），不是最终的源文件。继续用 `grep` 在 `arch/arm/lib/` 目录下搜索：
+`built-in.o` 是目录级聚合的目标文件（由该目录下所有 `.o` 文件合并而成，因此直接在该目录下查找就好），不是最终的源文件。继续用 `grep` 在 `arch/arm/lib/` 目录下搜索：
 
 ```bash
 grep -R "_main" arch/arm/lib/
+
+grep: arch/arm/lib/built-in.o: 匹配到二进制文件
+grep: arch/arm/lib/crt0_64.o: 匹配到二进制文件
+
 ```
 
 最终定位到 `crt0_64.S`（ARMv8 64位架构的 C 运行时启动文件）和 `crt0.S`（ARMv7 32位版本，根据架构选择对应文件）。
@@ -370,6 +378,12 @@ ENDPROC(_main)  # 标记函数结束
 ### 4.5.2. 重定位 (Relocation)
 
 U-boot 启动早期不在最终运行地址运行（DRAM 尚未初始化）。在 `board_init_f()` 中初始化 DRAM 后，U-boot 会将自己拷贝到 DRAM 的最终地址处——这就是 `relocate_code`。函数名中的 `_f` 和 `_r` 分别表示 "before/after relocation"。
+
+U-boot 早期多是在片上 SRAM 中运行，此时 DRAM 还未初始化。不过由于 SRAM 太小了，进入 U-boot proper 后需要一些近似于内核的功能，所以在完成 DRAM 的初始化后就会重定向，将自己搬到 DRAM 中去。
+
+**注意**：并不能简单将“重定位”和“DDR初始化”绑定！因为现代 U-boot 一般会在 SPL 阶段就将 DDR 进行初始化了，实际上我们看到的 U-boot 代码从 `Start.S` 开始已经进入了 U-boot proper 了，SPL 都过了！
+
+所以这里的 `board_init_f()` 和 `board_init_r()` 本质上只是 U-boot 在对自己初始化前后的区别。重定向前对自己进行初始化，然后重定向。
 
 ### 4.5.3. 进入主循环
 
