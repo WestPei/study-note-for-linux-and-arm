@@ -1,4 +1,16 @@
-# XGBoost
+# 1. 查找的数据集
+
+互联网上能够找到的公开数据集是：
+
+* [QAR Flight Data](https://www.kaggle.com/datasets/gijsbekkers/qar-flight-data)
+* [NASA Sample Flight Data](https://link.zhihu.com/?target=https%3A//c3.ndc.nasa.gov/dashlink/projects/85/resources/%3Fpage%3D4%26sort%3Dname%26type%3DNone)
+* [ALFA Dataset](https://theairlab.org/alfa-dataset/)
+
+
+
+# 2. 可能用到的算法
+
+## 2.1. XGBoost
 
 详情可以查看 [机器学习入门系列：一文详解XGBoost](https://zhuanlan.zhihu.com/p/1909251307363078414)。
 
@@ -6,7 +18,7 @@ XGBoost（eXtreme Gradient Boosting，极端梯度提升）是一种高效的机
 
 这是一种传统的机器学习方法，看起来就是一个决策树强化版。说是预测，其实就是通过训练集训练完成后，对新的数据进行分类的预测。看起来还是一个解决分类问题的手段，我们现在需要的是一个用于时间序列数据的预测的方案。
 
-# GRU & LSTM
+## 2.2. GRU & LSTM
 
 [GRU 原理](https://blog.csdn.net/Androiddddd/article/details/145264369)
 
