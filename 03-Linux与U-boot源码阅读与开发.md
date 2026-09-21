@@ -28,10 +28,13 @@
     - [4.5.2. 重定位 (Relocation)](#452-重定位-relocation)
     - [4.5.3. 进入主循环](#453-进入主循环)
     - [4.5.4. 关键调用链总结](#454-关键调用链总结)
-  - [4.6. U-boot 设备模型](#46-u-boot-设备模型)
-    - [4.6.1. 关键结构体](#461-关键结构体)
-    - [4.6.2. 初始化流程](#462-初始化流程)
-    - [4.6.3. 以 GMAC 为例](#463-以-gmac-为例)
+  - [4.6. U-boot 环境变量加载](#46-u-boot-环境变量加载)
+    - [4.6.1. `CONFIG_USING_KERNEL_DTB` 带来的变化](#461-config_using_kernel_dtb-带来的变化)
+    - [4.6.2. 经典加载流程](#462-经典加载流程)
+  - [4.7. U-boot 设备模型](#47-u-boot-设备模型)
+    - [4.7.1. 关键结构体](#471-关键结构体)
+    - [4.7.2. 初始化流程](#472-初始化流程)
+    - [4.7.3. 以 GMAC 为例](#473-以-gmac-为例)
 - [5. 案例：网口调试 (rk3568 GMAC)](#5-案例网口调试-rk3568-gmac)
   - [5.1. 背景](#51-背景)
   - [5.2. 排查过程](#52-排查过程)
@@ -65,6 +68,9 @@ Yocto 工程的初始化不可避免地使用 Bash 脚本，因此有必要掌�
 | `{1..10}` | **序列扩展** | **不**需要 `$`，直接生成一个序列。例如 `echo {1..3}` 输出 `1 2 3`，`touch file{01..03}.txt` 创建三个文件 |
 | `[ condition ]` | **条件测试** | `test` 命令的另一种形式，用于条件判断。括号内的条件表达式需要遵循特定规则，例如字符串比较用 `=`，整数比较用 `-eq` |
 | `[[ condition ]]` | **增强的条件测试** | 比 `[]` 更强大、更安全，支持模式匹配（`==`）和正则匹配（`=~`）。例如 `if [[ "$name" == u* ]]` |
+
+
+---
 
 ## 1.2. 赋值操作符
 
@@ -422,7 +428,234 @@ start.S: _main
         → main_loop()             // common/main.c
 ```
 
-## 4.6. U-boot 设备模型
+---
+
+## 4.6. U-boot 环境变量加载
+
+为了搞清楚 U-boot 环境变量是如何进行加载的，特别是有了存储介质之后，需求去中希望能够在 内核和 U-boot 命令行都能够配置 U-boot 环境变量，并且希望能够在线配置分区表。另外在 mmc 中的环境变量如果出现破坏，也能够恢复默认环境变量。有必要弄清 U-boot 环境变量的加载流程。
+
+在完成重定向后，U-boot 会进行一系列初始化，这些初始化都是通过 `init_sequence_r` 这么一个初始化函数指针数组来进行的，按照其顺序 `board_init()` 之后就是 `initr_env_switch()` 。入口处源码：
+
+```c
+#ifdef CONFIG_USING_KERNEL_DTB
+	initr_env_nowhere,
+#endif
+#if defined(CONFIG_BOARD_EARLY_INIT_R)
+	board_early_init_r,
+#endif
+
+#if defined(CONFIG_ARM) || defined(CONFIG_NDS32) || defined(CONFIG_RISCV)
+	board_init,	/* Setup chipselects */
+#endif
+#if defined(CONFIG_USING_KERNEL_DTB) && !defined(CONFIG_ENV_IS_NOWHERE)
+	initr_env_switch,
+#endif
+
+...
+
+#ifndef CONFIG_USING_KERNEL_DTB
+	/* init before storage(for: devtype, devnum, ...) */
+	initr_env,
+#endif
+```
+
+可以注意到，初始化环境变量有两条路，根据是否配置了 `CONFIG_USING_KERNEL_DTB` 进行了分叉。
+
+### 4.6.1. `CONFIG_USING_KERNEL_DTB` 带来的变化
+
+`CONFIG_USING_KERNEL_DTB` 允许 U-bot 阶段直接加载内核设备树来获取例如 regulator，屏显，usb等复杂设备(uart，emmc等设备仍使用 U-boot 自己的设备树)。由于该配置的启用会导致 U-boot 初始化顺序有区别。由于 DTB 的切换需要从环境变量中获取内核 DTB 的加载地址，所以需要预加载默认环境变量。我们可以来看一看具体的代码，DTB 的切换发生在 `board_init()` 中：
+
+```c
+arch/arm/mach-rockchip/board.c
+
+int board_init(void)
+{
+  #ifdef CONFIG_USING_KERNEL_DTB
+	init_kernel_dtb();
+  #endif
+}
+```
+
+在 `init_kernel_dtb()` 中完成了内核设备树的初始化(这里只截取了最终要的代码部分)：
+
+```c
+arch/arm/mach-rockchip/kernel_dtb.c
+
+int init_kernel_dtb(void)
+{
+  ...
+  fdt_addr = env_get_ulong("fdt_addr_r", 16, 0);
+  ...
+  ret = rockchip_read_dtb_file((void *)fdt_addr);
+}
+```
+
+可以看到这里需要使用到 `fdt_addr_r` 环境变量，因此需要预加载默认环境变量。否则只需要在后面直接 `initr_env()` 加载环境变量即可。而在 `initr_env()` 中会根据配置情况选择是否加载环境变量和从哪里加载。总之，**`CONFIG_USING_KERNEL_DTB` 导致了环境变量的加载变得复杂，原本的一步变为了两步**。
+
+那我们接着来看一看使能了该配置后，这里的两步到底在干什么吧。第一步会进入 `initr_env_nowhere`。这里一般就是加载最小的默认环境变量，能够完成对内核设备树的加载。这里具体代码就不看了(先 mark 一下)。其实里面也并不复杂，就是从源码宏中取出了一些必要的环境变量进行组装，然后 `set_board_env()` -> `himport_r()` 来导入环境变量。这个 `himport_r()` 应该是导入环境变量的核心函数，所有的流程最后都会调用它来完成实现，具体作用应该就是将源码中的环境变量宏导入到一个哈希表中供 U-boot 命令行查找。****
+
+在 `board_init()` 中完成了内核 DTB 加载后，如果用了存储设备储存环境变量，那么就会触发 `initr_env_switch()`，否则就会继续其他初始化，环境变量初始化到此为止。这里要求配置项 `CONFIG_ENV_IS_NOWHERE` 未配置。因为配置了该项，U-boot 就只会从源码中读取默认配置，虽然也可以通过 `setenv` 来配置环境变量，但是无法存储到 mmc 这类非易失性存储中，下一次上电后恢复为默认配置。
+
+我们进入 `initr_env_switch()` 内部看看：
+
+```c
+static int initr_env_switch(void)
+{
+	ALLOC_CACHE_ALIGN_BUFFER(env_t, env_nowhere, 1);
+	char *data;
+	int ret;
+
+	data = env_get("bootargs");
+	if (data) {
+		env_set("bootargs_tmp", data);
+		env_set("bootargs", NULL);
+	}
+
+	/* Export nowhere env for late use */
+	ret = env_export(env_nowhere);
+	if (ret) {
+		printf("%s: export nowhere env fail, ret=%d\n", __func__, ret);
+		return -EINVAL;
+	}
+
+	/* Destroy nowhere env and import storage env */
+	initr_env();
+
+	/* Append/override nowhere env to storage env */
+	set_board_env((char *)env_nowhere->data, ENV_SIZE, H_NOCLEAR, false);
+
+	/*
+	 * Restore nowhere bootargs to append/override the one in env storage.
+	 *
+	 * Without this, the entire "bootargs" in storage env is replaces by
+	 * the one in env_nowhere->data.
+	 */
+	data = env_get("bootargs_tmp");
+	if (data) {
+		env_update("bootargs", data);
+		env_set("bootargs_tmp", NULL);
+	}
+
+	return 0;
+}
+```
+
+这一步干了三件事：备份现有的环境变量，导入存储介质中的环境变量以及合并。
+
+`ret = env_export(env_nowhere)` 就是备份 `initr_env_nowhere()` 中配置的环境变量。`initr_env()` 就是回归经典加载流程，见下一小节。这里就是根据情况选择从 mmc 等存储介质中加载环境变量，或者使用默认环境变量。最后就是 `set_board_env()` 将一开始使用的 `env_nowhere()` 合并到现有的环境变量中去。
+
+**注意**：这里加载的顺序很重要，如果从 mmc 中加载了环境变量，那么最后 `set_board_env()` 会**覆盖 mmc 中定义的同名环境变量**。不过可以注意到的是，在 `initr_env_nowhere()` 中，加载的环境变量较少，只是用了初始化内核 DTB 必要的一些环境变量，并非全量加载。所以在最后覆盖时，**基本不会涉及到自定义的环境变量**。
+
+如果真的存在被覆盖的问题，也可以像 `initr_env_switch()` 中最后的：
+
+```c
+	/*
+	 * Restore nowhere bootargs to append/override the one in env storage.
+	 *
+	 * Without this, the entire "bootargs" in storage env is replaces by
+	 * the one in env_nowhere->data.
+	 */
+	data = env_get("bootargs_tmp");
+	if (data) {
+		env_update("bootargs", data);
+		env_set("bootargs_tmp", NULL);
+	}
+```
+
+这里就是在 mmc 中用 `bootargs_tmp` 进行了备份，避免 `set_board_env()` 将 mmc 的环境变量给覆盖了。
+
+
+
+
+### 4.6.2. 经典加载流程
+
+最简单的流程自然就是未配置 `CONFIG_USING_KERNEL_DTB` 的初始化了，就是直接调用 `initr_env`：
+
+```c
+static int initr_env(void)
+{
+	/* initialize environment */
+	if (should_load_env())
+		env_relocate();
+	else
+		set_default_env(NULL);
+#ifdef CONFIG_OF_CONTROL
+	env_set_addr("fdtcontroladdr", gd->fdt_blob);
+#endif
+
+	/* Initialize from environment */
+	load_addr = env_get_ulong("loadaddr", 16, load_addr);
+
+	return 0;
+}
+```
+
+其中，通过 `should_load_env()` 来判断加载环境变量的具体情况：
+
+```c
+static int should_load_env(void)
+{
+#ifdef CONFIG_OF_CONTROL
+	return fdtdec_get_config_int(gd->fdt_blob, "load-environment", 1);
+#elif defined CONFIG_DELAY_ENVIRONMENT
+	return 0;
+#else
+	return 1;
+#endif
+}
+```
+
+这里我们是进入了 `CONFIG_OF_CONTROL` 的分支，`fdtdec_get_config_int()` 会从 U-boot 设备树中寻找 `/config/load-environment` 的配置项读取对应值，也就是通过设备树来控制**是否从存储介质中的加载环境变量**，如果设备树未配置值，默认返回 `1`，也就是进入 `env_reloacate()`。
+
+
+
+```c
+void env_relocate(void)
+{
+#if defined(CONFIG_NEEDS_MANUAL_RELOC)
+	env_reloc();
+	env_htab.change_ok += gd->reloc_off;
+#endif
+	if (gd->env_valid == ENV_INVALID) {
+#if defined(CONFIG_ENV_IS_NOWHERE) || defined(CONFIG_SPL_BUILD)
+		/* Environment not changable */
+		set_default_env(NULL);
+#else
+		bootstage_error(BOOTSTAGE_ID_NET_CHECKSUM);
+		set_default_env("!bad CRC");
+#endif
+	} else {
+		env_load();
+	}
+}
+```
+
+这里就是关键了，`CONFIG_NEEDS_MANUAL_RELOC` 忽略，检查 `gd->env_valid` 的值，该值应该是由之前的初始化配置，我们这里不深究。但是可以看到当存储介质中的环境变量存在错误时，就会尝试使用默认配置，根据具体情况还会上报错误。如果存储环境变量无误，就调用 `env_load()` 进行加载。
+
+```c
+int env_load(void)
+{
+	struct env_driver *drv = env_driver_lookup_default();
+	int ret = 0;
+
+	if (!drv)
+		return -ENODEV;
+	if (!drv->load)
+		return 0;
+	ret = drv->load();
+	if (ret) {
+		debug("%s: Environment failed to load (err=%d)\n", __func__,
+		      ret);
+		return ret;
+	}
+
+	return 0;
+}
+```
+
+通过 `env_driver_lookup_default()` 查找对应的 env 设备驱动，然后调用 `drv->load()`。我们这里是 mmc，所以源码位于 `env/mmc.c`，函数指针 `load()` 指向 `env_mmc_load()`。该函数大体流程为从设备中读取环境变量，然后用 `env_import()` 导入环境变量到哈希表。其核心函数为 `himport_r()`。
+
+## 4.7. U-boot 设备模型
 
 U-boot 与 Kernel 有着类似的设备模型：
 
@@ -436,20 +669,20 @@ uclass (设备类别)
 driver (驱动) 来 probe / bind
 ```
 
-### 4.6.1. 关键结构体
+### 4.7.1. 关键结构体
 
 - **`udevice`**：设备实例，对应设备树中的一个节点
 - **`uclass`**：设备类别容器，类似于 `kset`，一类设备的集合
 - **`UCLASS_DRIVER`**：设备类别的总体定义（不是真正的驱动）
 - **`U_BOOT_DRIVER`**：驱动定义，初始化 `struct driver` 结构体，描述驱动属于哪类设备（`uclass id`）、能匹配哪些节点（`of_match`）、驱动操作等
 
-### 4.6.2. 初始化流程
+### 4.7.2. 初始化流程
 
 U-boot 设备模型初始化主要是在 `board_init_r() → initcall_run_list(init_sequence_r) → initr_dm()`。在这里会扫描设备树节点，建立其设备模型的基本拓扑结构，并且**绑定**设备和对应驱动。这里的绑定只是建立关系，并不会访问硬件。简单来说就是把 `udevice->driver` 指针给填上。但是实际上其对应的 `probe` 函数还未调用。
 
 需要到对应子系统初始化时（一般也在 `board_init_r()` 中），才调用 `probe` 真正初始化设备。
 
-### 4.6.3. 以 GMAC 为例
+### 4.7.3. 以 GMAC 为例
 
 ```
 initr_net()
