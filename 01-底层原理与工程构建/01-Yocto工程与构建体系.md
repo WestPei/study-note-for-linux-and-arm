@@ -844,7 +844,7 @@ S = "${WORKDIR}/kernel"
    ```
    这会让 bitbake 在当前配方目录下也查找文件。然后将原配方目录下的所有文件（`.cfg`、补丁等）整体拷贝到 `.bbappend` 所在目录。
 
-2. **固化到源码**：在 `do_configure` 完成后，进入 `${B}` 目录执行 `make savedefconfig`，将生成的精简 `defconfig` 放入源码 `arch/arm64/configs/` 目录，然后在配方中修改 `KBUILD_DEFCONFIG` 指向它（详见 02-文档第 2.2 节）。
+2. **固化到源码**：在 `do_configure` 完成后，进入 `${B}` 目录执行 `make savedefconfig`，将生成的精简 `defconfig` 放入源码 `arch/arm64/configs/` 目录，然后在配方中修改 `KBUILD_DEFCONFIG` 指向它（详见 [02-系统镜像制作与烧写](./02-系统镜像制作与烧写.md) 第 2.2 节）。
 
 ### 7.2.4. 跳过 do_patch
 
